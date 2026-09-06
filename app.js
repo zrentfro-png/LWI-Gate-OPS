@@ -669,23 +669,19 @@ function flightToRow(flight) {
 async function pushFlightToSheet(flight) {
   if (!SHEET_URL) return;
   setSyncStatus('online', '● Saving…');
-  const res = await fetch(SHEET_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain' }, // avoids CORS preflight on Apps Script
-    body: JSON.stringify({ action: 'upsert', row: flightToRow(flight) }),
-  });
-  if (!res.ok) throw new Error('Sheet save failed');
+  const params = new URLSearchParams({ action: 'upsert', row: JSON.stringify(flightToRow(flight)) });
+  const res = await fetch(SHEET_URL + '?' + params.toString());
+  const data = await res.json().catch(() => null);
+  if (!res.ok || (data && data.error)) throw new Error(data && data.error ? data.error : 'Sheet save failed');
   setSyncStatus('online', `● Synced with sheet (${new Date().toLocaleTimeString()})`);
 }
 
 async function deleteFlightFromSheet(id) {
   if (!SHEET_URL) return;
-  const res = await fetch(SHEET_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'text/plain' },
-    body: JSON.stringify({ action: 'delete', id }),
-  });
-  if (!res.ok) throw new Error('Sheet delete failed');
+  const params = new URLSearchParams({ action: 'delete', id });
+  const res = await fetch(SHEET_URL + '?' + params.toString());
+  const data = await res.json().catch(() => null);
+  if (!res.ok || (data && data.error)) throw new Error(data && data.error ? data.error : 'Sheet delete failed');
 }
 
 document.getElementById('syncBtn').addEventListener('click', () => {
