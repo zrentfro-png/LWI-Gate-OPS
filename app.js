@@ -28,9 +28,16 @@ const CONCOURSES = [...new Set(GATE_LIST.map(g => g.concourse))].sort();
 
 // ---------- Time helpers ----------
 
-function timeToMinutes(hhmm) {
-  if (!hhmm) return null;
-  const [h, m] = hhmm.split(':').map(Number);
+function timeToMinutes(raw) {
+  if (!raw) return null;
+  const str = raw.toString().trim();
+  const match = str.match(/^(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)?$/);
+  if (!match) return null;
+  let h = parseInt(match[1], 10);
+  const m = parseInt(match[2], 10);
+  const ampm = match[3] ? match[3].toUpperCase() : null;
+  if (ampm === 'PM' && h !== 12) h += 12;
+  if (ampm === 'AM' && h === 12) h = 0;
   return h * 60 + m;
 }
 function minutesToTime(mins) {
@@ -91,7 +98,7 @@ function suggestGatesFor(flight, excludeGateId) {
   const window = occupancyWindow(flight);
   if (!window) return [];
 
-  const candidates = GATE_LIST.filter(g => g.airline === flight.airline && g.id !== excludeGateId);
+  const candidates = GATE_LIST.filter(g => airlinesMatch(g.airline, flight.airline) && g.id !== excludeGateId);
 
   const scored = candidates.map(g => {
     const conflictsAtGate = FLIGHTS.filter(f =>
@@ -117,12 +124,27 @@ function suggestGatesFor(flight, excludeGateId) {
 
 // ---------- Airline / gate ownership check ----------
 
+// Normalizes an airline name for comparison only (never used for display).
+function normalizeAirline(str) {
+  return (str || '').toString().trim().toUpperCase();
+}
+
+// Forgiving match: handles case differences and cases where one side is a
+// short name and the other is a full name (e.g. sheet says "United
+// Airlines", config.js says "UNITED").
+function airlinesMatch(a, b) {
+  const na = normalizeAirline(a);
+  const nb = normalizeAirline(b);
+  if (!na || !nb) return false;
+  return na === nb || na.includes(nb) || nb.includes(na);
+}
+
 // Returns true if the flight's airline doesn't match who the gate
 // actually belongs to (per config.js GATE_MAP).
 function isWrongAirlineGate(flight) {
   const gate = GATE_BY_ID[flight.gate];
   if (!gate) return false; // unknown/typo'd gate — not our call to flag here
-  return gate.airline !== flight.airline;
+  return !airlinesMatch(gate.airline, flight.airline);
 }
 
 // ---------- Rendering ----------
@@ -292,7 +314,7 @@ function handleGateDrop(evt) {
   if (!flight) return;
 
   const gateOwner = evt.to.dataset.airline;
-  if (gateOwner && gateOwner !== flight.airline) {
+  if (gateOwner && !airlinesMatch(gateOwner, flight.airline)) {
     const proceed = confirm(
       `Gate ${newGate} belongs to ${gateOwner}, but ${flight.flightNumber} is a ${flight.airline} flight.\n\nMove it here anyway?`
     );
@@ -393,7 +415,7 @@ document.getElementById('flightForm').addEventListener('submit', (e) => {
   };
 
   const gateInfo = GATE_BY_ID[flightData.gate];
-  if (gateInfo && gateInfo.airline !== flightData.airline) {
+  if (gateInfo && !airlinesMatch(gateInfo.airline, flightData.airline)) {
     const proceed = confirm(
       `Gate ${flightData.gate} belongs to ${gateInfo.airline}, but this is a ${flightData.airline} flight.\n\nSave it here anyway?`
     );
