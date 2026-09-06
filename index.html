@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gate Ops Board</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <header class="topbar">
+    <div class="topbar-left">
+      <span class="brand-mark">GATE OPS</span>
+      <span id="clock" class="clock">--:--:--</span>
+    </div>
+    <div class="topbar-mid">
+      <input id="searchBox" type="text" placeholder="Search flight, gate, or destination" />
+      <select id="statusFilter">
+        <option value="all">All statuses</option>
+        <option value="ON TIME">On time</option>
+        <option value="DELAYED">Delayed</option>
+        <option value="BOARDING">Boarding</option>
+        <option value="CANCELLED">Cancelled</option>
+        <option value="DIVERTED">Diverted</option>
+      </select>
+    </div>
+    <div class="topbar-right">
+      <span id="syncStatus" class="sync-status sync-offline">● Local data (not synced)</span>
+      <button id="syncBtn" class="btn btn-ghost">Connect Sheet</button>
+      <button id="addFlightBtn" class="btn btn-primary">+ Add Flight</button>
+    </div>
+  </header>
+
+  <div id="conflictBanner" class="conflict-banner hidden"></div>
+
+  <main id="board" class="board">
+    <!-- concourse columns injected by app.js -->
+  </main>
+
+  <!-- Flight edit / add modal -->
+  <div id="flightModal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h2 id="modalTitle">Add Flight</h2>
+        <button id="modalClose" class="modal-close">&times;</button>
+      </div>
+      <form id="flightForm" class="modal-body">
+        <input type="hidden" id="f_id" />
+        <label>Airline
+          <select id="f_airline" required></select>
+        </label>
+        <label>Flight number
+          <input id="f_flightnum" type="text" placeholder="UA 1842" required />
+        </label>
+        <label>To (destination)
+          <input id="f_to" type="text" placeholder="DEN" required />
+        </label>
+        <label>Gate
+          <input id="f_gate" type="text" placeholder="A14" required list="gateList" />
+          <datalist id="gateList"></datalist>
+        </label>
+        <label>Boarding time
+          <input id="f_boarding" type="time" required />
+        </label>
+        <label>Departure time
+          <input id="f_departure" type="time" required />
+        </label>
+        <label>Status
+          <select id="f_status">
+            <option>ON TIME</option>
+            <option>DELAYED</option>
+            <option>BOARDING</option>
+            <option>CANCELLED</option>
+            <option>DIVERTED</option>
+          </select>
+        </label>
+        <label>Comments
+          <textarea id="f_comments" rows="2" placeholder="Aircraft swap, mechanical, etc."></textarea>
+        </label>
+        <div id="suggestBox" class="suggest-box hidden"></div>
+        <div class="modal-actions">
+          <button type="button" id="deleteFlightBtn" class="btn btn-danger-ghost hidden">Remove flight</button>
+          <div class="modal-actions-right">
+            <button type="button" id="modalCancel" class="btn btn-ghost">Cancel</button>
+            <button type="submit" class="btn btn-primary">Save flight</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Sheet connect modal -->
+  <div id="sheetModal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Connect Google Sheet</h2>
+        <button id="sheetModalClose" class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-help">Paste the Apps Script Web App URL from your deployment (see README for setup steps). Once connected, gate drags and edits write straight back to your "flights" tab.</p>
+        <label>Web App URL
+          <input id="sheetUrlInput" type="text" placeholder="https://script.google.com/macros/s/XXXX/exec" />
+        </label>
+        <div class="modal-actions">
+          <div class="modal-actions-right">
+            <button type="button" id="sheetModalCancel" class="btn btn-ghost">Cancel</button>
+            <button type="button" id="sheetModalSave" class="btn btn-primary">Connect & load</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.2/Sortable.min.js"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
