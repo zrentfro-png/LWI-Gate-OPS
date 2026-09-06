@@ -141,7 +141,8 @@ html, body {
 /* ---------- Board layout ---------- */
 
 .board {
-  overflow-x: auto;
+  overflow: auto;
+  height: calc(100vh - 62px);
 }
 
 .timeline-scroll {
@@ -154,7 +155,7 @@ html, body {
 .timeline-header-row {
   display: flex;
   position: sticky;
-  top: 61px;
+  top: 0;
   z-index: 15;
   background: var(--bg);
 }
@@ -164,6 +165,7 @@ html, body {
   left: 0;
   z-index: 16;
   width: 76px;
+  height: 34px;
   flex-shrink: 0;
   background: var(--panel);
   border-right: 1px solid var(--line);
@@ -179,23 +181,24 @@ html, body {
 .time-header {
   display: flex;
   border-bottom: 1px solid var(--line);
+  height: 34px;
 }
 
 .time-cell {
   flex-shrink: 0;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 12px;
   color: var(--text-faint);
   border-left: 1px solid var(--line);
   display: flex;
   align-items: center;
   justify-content: center;
-  padding-top: 2px;
 }
 .time-cell-hour {
-  color: var(--text-muted);
-  font-weight: 600;
-  border-left: 1px solid #384258;
+  color: var(--text);
+  font-weight: 700;
+  font-size: 13px;
+  border-left: 1px solid #4a5670;
 }
 
 /* ---- Concourse label row ---- */
@@ -287,6 +290,20 @@ html, body {
 }
 .flight-card:hover { z-index: 6; box-shadow: 0 2px 10px rgba(0,0,0,0.4); }
 .flight-card.dragging { opacity: 0.4; }
+
+.resize-handle {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 7px;
+  cursor: ew-resize;
+  z-index: 3;
+}
+.resize-left { left: 0; }
+.resize-right { right: 0; }
+.resize-handle:hover {
+  background: rgba(62,123,250,0.35);
+}
 
 .flight-card.status-delayed {
   border-left-color: var(--warn);

@@ -13,9 +13,11 @@ const CONFIG = {
   INTERVAL_MINUTES: 15,      // width of each time column, in minutes
   COLUMN_WIDTH_PX: 60,       // pixel width of each 15-min column — widen if labels feel cramped
 
-  // How many minutes before DEPARTURE TIME the aircraft is
-  // considered to occupy the gate (i.e. standard turnaround).
-  TURNAROUND_MINUTES: 45,
+  // How many minutes before DEPARTURE TIME the aircraft is considered to
+  // occupy the gate, used as a fallback when BOARDING TIME can't be read.
+  // Also sets the minimum block length even when boarding is close to
+  // departure. 90 = 1.5 hours.
+  TURNAROUND_MINUTES: 90,
 
   // Gate ranges and which airline they belong to.
   // "start"/"end" are used to expand into individual gate IDs,

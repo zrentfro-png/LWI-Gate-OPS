@@ -63,9 +63,23 @@ function toTimelineMinutes(raw) {
 function occupancyWindow(flight) {
   const dep = toTimelineMinutes(flight.departure);
   if (dep === null) return null;
-  const start = dep - CONFIG.TURNAROUND_MINUTES;
+  const turnaroundStart = dep - CONFIG.TURNAROUND_MINUTES;
+  const boarding = toTimelineMinutes(flight.boarding);
+  const start = boarding !== null ? Math.min(boarding, turnaroundStart) : turnaroundStart;
   const end = dep + (flight.status === 'DELAYED' ? 20 : 0);
   return { start, end };
+}
+
+// Converts internal timeline minutes back into a "H:MM AM/PM" string
+// matching the format already used in the sheet.
+function minutesToClockString(mins) {
+  const m = ((Math.round(mins) % 1440) + 1440) % 1440;
+  const h = Math.floor(m / 60);
+  const mm = (m % 60).toString().padStart(2, '0');
+  const ampm = h < 12 ? 'AM' : 'PM';
+  let h12 = h % 12;
+  if (h12 === 0) h12 = 12;
+  return `${h12}:${mm} ${ampm}`;
 }
 
 function windowsOverlap(a, b) {
@@ -217,6 +231,8 @@ function renderFlightCard(flight, isConflict) {
     ${flight.comments ? `<div class="fc-comment">${escapeHtml(flight.comments)}</div>` : ''}
     ${isConflict ? `<div class="fc-conflict-note">Overlaps another aircraft at this gate</div>` : ''}
     ${!isConflict && isWrongAirlineGate(flight) ? `<div class="fc-wrong-airline-note">On a ${GATE_BY_ID[flight.gate].airline} gate</div>` : ''}
+    <div class="resize-handle resize-left" title="Drag to change boarding time"></div>
+    <div class="resize-handle resize-right" title="Drag to change departure time"></div>
   `;
 
   card.addEventListener('click', () => {
@@ -336,6 +352,7 @@ function renderBoard() {
           card.style.width = '150px';
         }
         track.appendChild(card);
+        attachResizeHandlers(card, f);
       });
 
       attachDropHandlers(track);
@@ -347,6 +364,67 @@ function renderBoard() {
   });
 
   board.appendChild(scrollArea);
+}
+
+function attachResizeHandlers(card, flight) {
+  const leftHandle = card.querySelector('.resize-left');
+  const rightHandle = card.querySelector('.resize-right');
+  const pxPerMin = COL_WIDTH / INTERVAL_MIN;
+
+  function startResize(e, isLeft) {
+    e.stopPropagation();
+    e.preventDefault();
+    card.draggable = false;
+    const startX = e.clientX;
+    const baseLeft = parseFloat(card.style.left);
+    const baseWidth = parseFloat(card.style.width);
+
+    function onMoveSimple(ev) {
+      const dx = ev.clientX - startX;
+      if (isLeft) {
+        let newLeft = baseLeft + dx;
+        let newWidth = baseWidth - dx;
+        if (newWidth < 30) { newWidth = 30; newLeft = baseLeft + (baseWidth - 30); }
+        card.style.left = newLeft + 'px';
+        card.style.width = newWidth + 'px';
+      } else {
+        let newWidth = baseWidth + dx;
+        if (newWidth < 30) newWidth = 30;
+        card.style.width = newWidth + 'px';
+      }
+    }
+
+    function onUp(ev) {
+      document.removeEventListener('mousemove', onMoveSimple);
+      document.removeEventListener('mouseup', onUp);
+      card.draggable = true;
+      const dx = ev.clientX - startX;
+      const deltaMinRaw = dx / pxPerMin;
+      const deltaMin = Math.round(deltaMinRaw / INTERVAL_MIN) * INTERVAL_MIN;
+
+      if (isLeft) {
+        const win = occupancyWindow(flight);
+        const baseStart = win ? win.start : (toTimelineMinutes(flight.departure) - CONFIG.TURNAROUND_MINUTES);
+        flight.boarding = minutesToClockString(baseStart + deltaMin);
+      } else {
+        const dep = toTimelineMinutes(flight.departure) ?? 0;
+        flight.departure = minutesToClockString(dep + deltaMin);
+      }
+
+      renderBoard();
+      if (SHEET_URL) {
+        pushFlightToSheet(flight).catch(() => {
+          alert('Resized locally, but could not sync the new time to the sheet.');
+        });
+      }
+    }
+
+    document.addEventListener('mousemove', onMoveSimple);
+    document.addEventListener('mouseup', onUp);
+  }
+
+  leftHandle.addEventListener('mousedown', (e) => startResize(e, true));
+  rightHandle.addEventListener('mousedown', (e) => startResize(e, false));
 }
 
 // ---------- Drag and drop (native HTML5 DnD; vertical gate moves only, time stays fixed) ----------
@@ -412,7 +490,9 @@ function handleGateDrop(flightId, newGate, gateOwner) {
 
 function populateAirlineOptions() {
   const select = document.getElementById('f_airline');
-  const airlines = [...new Set(CONFIG.GATE_MAP.map(g => g.airline))].sort();
+  const fromConfig = CONFIG.GATE_MAP.map(g => g.airline);
+  const fromFlights = FLIGHTS.map(f => f.airline);
+  const airlines = [...new Set([...fromConfig, ...fromFlights])].filter(Boolean).sort();
   select.innerHTML = airlines.map(a => `<option value="${a}">${a}</option>`).join('');
 }
 
@@ -422,6 +502,7 @@ function populateGateDatalist() {
 }
 
 function openFlightModal(flightId) {
+  populateAirlineOptions();
   const modal = document.getElementById('flightModal');
   const isEdit = !!flightId;
   document.getElementById('modalTitle').textContent = isEdit ? 'Edit Flight' : 'Add Flight';
