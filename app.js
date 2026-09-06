@@ -8,7 +8,6 @@ let FLIGHTS = [];           // active list of flight objects
 let SHEET_URL = localStorage.getItem('gateops_sheet_url') || '';
 let searchTerm = '';
 let statusFilterVal = 'all';
-let sortableInstances = [];
 
 // ---------- Gate map expansion ----------
 
@@ -176,6 +175,7 @@ function renderFlightCard(flight, isConflict) {
   const card = document.createElement('div');
   card.className = 'flight-card';
   card.dataset.flightId = flight.id;
+  card.draggable = true;
 
   const statusClass = isConflict ? 'status-conflict'
     : flight.status === 'DELAYED' ? 'status-delayed'
@@ -208,7 +208,18 @@ function renderFlightCard(flight, isConflict) {
     ${!isConflict && isWrongAirlineGate(flight) ? `<div class="fc-wrong-airline-note">On a ${GATE_BY_ID[flight.gate].airline} gate</div>` : ''}
   `;
 
-  card.addEventListener('click', () => openFlightModal(flight.id));
+  card.addEventListener('click', () => {
+    if (card.classList.contains('was-dragged')) return; // suppress click right after a drag
+    openFlightModal(flight.id);
+  });
+  card.addEventListener('dragstart', (e) => {
+    e.dataTransfer.setData('text/plain', flight.id);
+    e.dataTransfer.effectAllowed = 'move';
+    card.classList.add('dragging');
+  });
+  card.addEventListener('dragend', () => {
+    card.classList.remove('dragging');
+  });
   return card;
 }
 
@@ -218,76 +229,130 @@ function escapeHtml(str) {
   return div.innerHTML;
 }
 
+// ---------- Timeline geometry ----------
+
+const TIMELINE_START_MIN = timeToMinutes(CONFIG.TIMELINE_START) ?? 300; // default 05:00
+const TIMELINE_END_MIN = timeToMinutes(CONFIG.TIMELINE_END) ?? 1440;    // default 24:00
+const INTERVAL_MIN = CONFIG.INTERVAL_MINUTES || 15;
+const COL_WIDTH = CONFIG.COLUMN_WIDTH_PX || 60;
+const TOTAL_COLUMNS = Math.ceil((TIMELINE_END_MIN - TIMELINE_START_MIN) / INTERVAL_MIN);
+const TIMELINE_WIDTH = TOTAL_COLUMNS * COL_WIDTH;
+
+function minutesToX(mins) {
+  return ((mins - TIMELINE_START_MIN) / INTERVAL_MIN) * COL_WIDTH;
+}
+
+function renderTimeHeader() {
+  const header = document.createElement('div');
+  header.className = 'time-header';
+  header.style.width = TIMELINE_WIDTH + 'px';
+  for (let i = 0; i < TOTAL_COLUMNS; i++) {
+    const mins = TIMELINE_START_MIN + i * INTERVAL_MIN;
+    const cell = document.createElement('div');
+    cell.className = 'time-cell' + (mins % 60 === 0 ? ' time-cell-hour' : '');
+    cell.style.width = COL_WIDTH + 'px';
+    cell.textContent = mins % 60 === 0 ? minutesToTime(mins) : '';
+    header.appendChild(cell);
+  }
+  return header;
+}
+
 function renderBoard() {
   const board = document.getElementById('board');
   board.innerHTML = '';
-  sortableInstances.forEach(s => s.destroy());
-  sortableInstances = [];
 
   const conflicts = computeConflicts();
   updateConflictBanner(conflicts);
+
+  const scrollArea = document.createElement('div');
+  scrollArea.className = 'timeline-scroll';
+
+  // header row: corner + time ruler
+  const headerRow = document.createElement('div');
+  headerRow.className = 'timeline-header-row';
+  const corner = document.createElement('div');
+  corner.className = 'corner-cell';
+  corner.textContent = 'GATE';
+  headerRow.appendChild(corner);
+  headerRow.appendChild(renderTimeHeader());
+  scrollArea.appendChild(headerRow);
 
   CONCOURSES.forEach(concourse => {
     const gatesInConcourse = GATE_LIST.filter(g => g.concourse === concourse);
     const airlinesHere = [...new Set(gatesInConcourse.map(g => g.airline))];
 
-    const col = document.createElement('section');
-    col.className = 'concourse';
-
-    const header = document.createElement('div');
-    header.className = 'concourse-header';
-    header.innerHTML = `
-      <div class="concourse-title">CONCOURSE ${concourse}</div>
-      <div class="concourse-sub">${airlinesHere.join(' · ')}</div>
-    `;
-    col.appendChild(header);
+    const labelRow = document.createElement('div');
+    labelRow.className = 'concourse-label-row';
+    const labelCorner = document.createElement('div');
+    labelCorner.className = 'corner-cell concourse-corner';
+    labelRow.appendChild(labelCorner);
+    const labelBody = document.createElement('div');
+    labelBody.className = 'concourse-label-body';
+    labelBody.style.width = TIMELINE_WIDTH + 'px';
+    labelBody.innerHTML = `<span class="concourse-title">CONCOURSE ${concourse}</span><span class="concourse-sub">${airlinesHere.join(' · ')}</span>`;
+    labelRow.appendChild(labelBody);
+    scrollArea.appendChild(labelRow);
 
     gatesInConcourse.forEach(gate => {
       const row = document.createElement('div');
-      row.className = 'gate-row';
+      row.className = 'timeline-row';
 
       const gateIdEl = document.createElement('div');
-      gateIdEl.className = 'gate-id';
+      gateIdEl.className = 'gate-id-cell';
       gateIdEl.textContent = gate.id;
 
-      const dropzone = document.createElement('div');
-      dropzone.className = 'gate-dropzone';
-      dropzone.dataset.gateId = gate.id;
-      dropzone.dataset.airline = gate.airline;
+      const track = document.createElement('div');
+      track.className = 'gate-track';
+      track.style.width = TIMELINE_WIDTH + 'px';
+      track.style.backgroundSize = `${COL_WIDTH}px 100%`;
+      track.dataset.gateId = gate.id;
+      track.dataset.airline = gate.airline;
 
-      const flightsHere = FLIGHTS
-        .filter(f => f.gate === gate.id && flightMatchesFilters(f))
-        .sort((a, b) => timeToMinutes(a.departure) - timeToMinutes(b.departure));
+      const flightsHere = FLIGHTS.filter(f => f.gate === gate.id && flightMatchesFilters(f));
+      flightsHere.forEach(f => {
+        const win = occupancyWindow(f);
+        const card = renderFlightCard(f, conflicts.has(f.id));
+        if (win) {
+          const left = Math.max(minutesToX(win.start), 0);
+          const width = Math.max(minutesToX(win.end) - minutesToX(win.start), 40);
+          card.style.position = 'absolute';
+          card.style.left = left + 'px';
+          card.style.width = width + 'px';
+        } else {
+          // time didn't parse — pin to the far left so it's still visible/editable
+          card.style.position = 'absolute';
+          card.style.left = '0px';
+          card.style.width = '150px';
+        }
+        track.appendChild(card);
+      });
 
-      if (flightsHere.length === 0) {
-        const empty = document.createElement('div');
-        empty.className = 'gate-empty';
-        empty.textContent = 'Open';
-        dropzone.appendChild(empty);
-      } else {
-        flightsHere.forEach(f => {
-          const isConflict = conflicts.has(f.id);
-          dropzone.appendChild(renderFlightCard(f, isConflict));
-        });
-      }
+      attachDropHandlers(track);
 
       row.appendChild(gateIdEl);
-      row.appendChild(dropzone);
-      col.appendChild(row);
+      row.appendChild(track);
+      scrollArea.appendChild(row);
     });
-
-    board.appendChild(col);
   });
 
-  // Attach Sortable to every dropzone, shared group so cards can move across gates
-  document.querySelectorAll('.gate-dropzone').forEach(zone => {
-    const s = Sortable.create(zone, {
-      group: 'gates',
-      animation: 150,
-      onAdd: handleGateDrop,
-      onStart: () => zone.classList.add('drag-active'),
-    });
-    sortableInstances.push(s);
+  board.appendChild(scrollArea);
+}
+
+// ---------- Drag and drop (native HTML5 DnD; vertical gate moves only, time stays fixed) ----------
+
+function attachDropHandlers(track) {
+  track.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    track.classList.add('drag-over');
+  });
+  track.addEventListener('dragleave', () => {
+    track.classList.remove('drag-over');
+  });
+  track.addEventListener('drop', (e) => {
+    e.preventDefault();
+    track.classList.remove('drag-over');
+    const flightId = e.dataTransfer.getData('text/plain');
+    handleGateDrop(flightId, track.dataset.gateId, track.dataset.airline);
   });
 }
 
@@ -307,32 +372,25 @@ function updateConflictBanner(conflicts) {
 
 // ---------- Drag and drop handler ----------
 
-function handleGateDrop(evt) {
-  const flightId = evt.item.dataset.flightId;
-  const newGate = evt.to.dataset.gateId;
+function handleGateDrop(flightId, newGate, gateOwner) {
   const flight = FLIGHTS.find(f => f.id === flightId);
-  if (!flight) return;
+  if (!flight || flight.gate === newGate) return;
 
-  const gateOwner = evt.to.dataset.airline;
   if (gateOwner && !airlinesMatch(gateOwner, flight.airline)) {
     const proceed = confirm(
       `Gate ${newGate} belongs to ${gateOwner}, but ${flight.flightNumber} is a ${flight.airline} flight.\n\nMove it here anyway?`
     );
-    if (!proceed) {
-      renderBoard(); // snap back to the last known state
-      return;
-    }
+    if (!proceed) return;
   }
 
   const oldGate = flight.gate;
   flight.gate = newGate;
 
-  // Re-render so ordering/conflict states are recalculated cleanly
   renderBoard();
 
   if (SHEET_URL) {
     pushFlightToSheet(flight).catch(() => {
-      flight.gate = oldGate; // revert on failure
+      flight.gate = oldGate;
       renderBoard();
       alert('Could not save gate change to the sheet. Reverted. Check your connection and try again.');
     });

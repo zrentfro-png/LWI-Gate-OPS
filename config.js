@@ -6,6 +6,13 @@
 
 const CONFIG = {
 
+  // Timeline grid settings — controls the spreadsheet-style view where
+  // time runs across the top in intervals and gates run down the side.
+  TIMELINE_START: "05:00",   // earliest time column shown
+  TIMELINE_END: "24:00",     // latest time column shown (24:00 = midnight)
+  INTERVAL_MINUTES: 15,      // width of each time column, in minutes
+  COLUMN_WIDTH_PX: 60,       // pixel width of each 15-min column — widen if labels feel cramped
+
   // How many minutes before DEPARTURE TIME the aircraft is
   // considered to occupy the gate (i.e. standard turnaround).
   TURNAROUND_MINUTES: 45,

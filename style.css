@@ -141,98 +141,152 @@ html, body {
 /* ---------- Board layout ---------- */
 
 .board {
+  overflow-x: auto;
+}
+
+.timeline-scroll {
+  display: inline-block;
+  min-width: 100%;
+}
+
+/* ---- Header row: corner + time ruler ---- */
+
+.timeline-header-row {
   display: flex;
-  flex-direction: column;
-}
-
-.concourse {
-  border-bottom: 1px solid var(--line);
-  padding-bottom: 8px;
-}
-.concourse:last-child { border-bottom: none; }
-
-.concourse-header {
   position: sticky;
   top: 61px;
+  z-index: 15;
   background: var(--bg);
-  padding: 14px 16px 10px;
+}
+
+.corner-cell {
+  position: sticky;
+  left: 0;
+  z-index: 16;
+  width: 76px;
+  flex-shrink: 0;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
-  z-index: 10;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.time-header {
+  display: flex;
+  border-bottom: 1px solid var(--line);
+}
+
+.time-cell {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-faint);
+  border-left: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding-top: 2px;
+}
+.time-cell-hour {
+  color: var(--text-muted);
+  font-weight: 600;
+  border-left: 1px solid #384258;
+}
+
+/* ---- Concourse label row ---- */
+
+.concourse-label-row {
+  display: flex;
+  position: sticky;
+  left: 0;
+  z-index: 5;
+}
+.concourse-corner {
+  background: var(--panel-raised);
+}
+.concourse-label-body {
+  background: var(--panel-raised);
+  border-bottom: 1px solid var(--line);
+  border-top: 1px solid var(--line);
+  padding: 6px 12px;
+  position: sticky;
+  left: 76px;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
 }
 
 .concourse-title {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.04em;
   color: var(--text);
 }
-
 .concourse-sub {
   font-size: 11px;
   color: var(--text-faint);
-  margin-top: 2px;
 }
 
-.gate-row {
+/* ---- Gate rows ---- */
+
+.timeline-row {
   display: flex;
   border-bottom: 1px solid var(--line);
-  padding: 10px 16px;
-  gap: 12px;
-  align-items: flex-start;
 }
 
-.gate-id {
+.gate-id-cell {
+  position: sticky;
+  left: 0;
+  z-index: 4;
+  width: 76px;
+  flex-shrink: 0;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--text-muted);
-  width: 34px;
-  flex-shrink: 0;
-  padding-top: 8px;
-}
-
-.gate-dropzone {
-  flex: 1;
-  min-height: 44px;
   display: flex;
-  flex-direction: row;
-  flex-wrap: wrap;
-  gap: 8px;
-  border-radius: 4px;
+  align-items: center;
+  justify-content: center;
 }
 
-.flight-card {
-  width: 220px;
-  flex-shrink: 0;
+.gate-track {
+  position: relative;
+  min-height: 64px;
+  background-image: linear-gradient(to right, var(--line) 1px, transparent 1px);
+  background-repeat: repeat-x;
 }
-
-.gate-dropzone.drag-over {
-  background: rgba(62,123,250,0.08);
+.gate-track.drag-over {
+  background-color: rgba(62,123,250,0.08);
   outline: 1px dashed var(--info);
-}
-
-.gate-empty {
-  font-size: 11px;
-  color: var(--text-faint);
-  padding: 8px 4px;
-  font-style: italic;
+  outline-offset: -1px;
 }
 
 /* ---------- Flight card ---------- */
 
 .flight-card {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
   background: var(--panel-raised);
   border: 1px solid var(--line);
   border-left: 3px solid var(--info);
   border-radius: 3px;
-  padding: 8px 10px;
+  padding: 4px 8px;
   cursor: grab;
-  transition: transform 0.08s ease;
+  overflow: hidden;
+  transition: box-shadow 0.08s ease;
+  z-index: 2;
 }
-.flight-card:active { cursor: grabbing; }
-.flight-card.sortable-ghost { opacity: 0.35; }
-.flight-card.sortable-chosen { transform: scale(1.02); }
+.flight-card:hover { z-index: 6; box-shadow: 0 2px 10px rgba(0,0,0,0.4); }
+.flight-card.dragging { opacity: 0.4; }
 
 .flight-card.status-delayed {
   border-left-color: var(--warn);
@@ -269,18 +323,19 @@ html, body {
 
 .fc-times {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 10px;
   color: var(--text-muted);
-  margin-top: 3px;
+  margin-top: 1px;
   display: flex;
   justify-content: space-between;
+  white-space: nowrap;
 }
 
 .fc-status-line {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-top: 5px;
+  margin-top: 2px;
 }
 
 .fc-status-pill {
