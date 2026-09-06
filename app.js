@@ -46,11 +46,22 @@ function minutesToTime(mins) {
   return `${h}:${m}`;
 }
 
+// Converts a flight time to its position on the timeline, accounting for
+// overnight schedules. Any time earlier than the timeline's start hour
+// (e.g. 12:15 AM when the day starts at 05:00) is treated as happening
+// after midnight on the "next day" portion of the grid, not jumping back
+// to the far left.
+function toTimelineMinutes(raw) {
+  const mins = timeToMinutes(raw);
+  if (mins === null) return null;
+  return mins < TIMELINE_START_MIN ? mins + 1440 : mins;
+}
+
 // Occupancy window for a flight: from (departure - turnaround) to departure.
 // Delayed flights get an extra buffer added to the end since the exact
 // new departure time is often still uncertain.
 function occupancyWindow(flight) {
-  const dep = timeToMinutes(flight.departure);
+  const dep = toTimelineMinutes(flight.departure);
   if (dep === null) return null;
   const start = dep - CONFIG.TURNAROUND_MINUTES;
   const end = dep + (flight.status === 'DELAYED' ? 20 : 0);
@@ -74,7 +85,7 @@ function computeConflicts() {
     byGate[f.gate].push(f);
   });
   Object.values(byGate).forEach(list => {
-    list.sort((a, b) => timeToMinutes(a.departure) - timeToMinutes(b.departure));
+    list.sort((a, b) => toTimelineMinutes(a.departure) - toTimelineMinutes(b.departure));
     for (let i = 0; i < list.length; i++) {
       for (let j = i + 1; j < list.length; j++) {
         const wa = occupancyWindow(list[i]);
