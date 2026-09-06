@@ -141,18 +141,15 @@ html, body {
 /* ---------- Board layout ---------- */
 
 .board {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-  gap: 0;
-  align-items: start;
+  display: flex;
+  flex-direction: column;
 }
 
 .concourse {
-  border-right: 1px solid var(--line);
-  min-height: calc(100vh - 100px);
-  padding-bottom: 40px;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 8px;
 }
-.concourse:last-child { border-right: none; }
+.concourse:last-child { border-bottom: none; }
 
 .concourse-header {
   position: sticky;
@@ -199,9 +196,15 @@ html, body {
   flex: 1;
   min-height: 44px;
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 8px;
   border-radius: 4px;
+}
+
+.flight-card {
+  width: 220px;
+  flex-shrink: 0;
 }
 
 .gate-dropzone.drag-over {
