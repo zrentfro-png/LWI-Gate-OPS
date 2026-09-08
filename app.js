@@ -12,22 +12,18 @@ const SHEET_URL =
 let searchTerm = '';
 let statusFilterVal = 'all';
 
-// Stores the exact values when a gate drag begins.
-// Gate dragging NEVER changes the flight times.
 let ACTIVE_DRAG = null;
 
 
-// ---------- Gate map expansion ----------
+// ============================================================
+// GATE MAP
+// ============================================================
 
 function buildGateList() {
   const gates = [];
 
   CONFIG.GATE_MAP.forEach(range => {
-    for (
-      let n = range.start;
-      n <= range.end;
-      n++
-    ) {
+    for (let n = range.start; n <= range.end; n++) {
       gates.push({
         id: `${range.concourse}${n}`,
         concourse: range.concourse,
@@ -40,24 +36,17 @@ function buildGateList() {
   return gates;
 }
 
-const GATE_LIST =
-  buildGateList();
+const GATE_LIST = buildGateList();
 
-const GATE_BY_ID =
-  Object.fromEntries(
-    GATE_LIST.map(
-      g => [g.id, g]
-    )
-  );
+const GATE_BY_ID = Object.fromEntries(
+  GATE_LIST.map(g => [g.id, g])
+);
 
-const CONCOURSES =
-  [
-    ...new Set(
-      GATE_LIST.map(
-        g => g.concourse
-      )
-    )
-  ].sort();
+const CONCOURSES = [
+  ...new Set(
+    GATE_LIST.map(g => g.concourse)
+  )
+].sort();
 
 
 // ============================================================
@@ -73,97 +62,53 @@ function timeToMinutes(raw) {
     return null;
   }
 
-  const str =
-    raw
-      .toString()
-      .trim();
+  const str = raw.toString().trim();
 
-  const match =
-    str.match(
-      /^(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)?$/
-    );
+  const match = str.match(
+    /^(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)?$/
+  );
 
   if (!match) {
     return null;
   }
 
-  let h =
-    parseInt(
-      match[1],
-      10
-    );
+  let h = parseInt(match[1], 10);
+  const m = parseInt(match[2], 10);
 
-  const m =
-    parseInt(
-      match[2],
-      10
-    );
-
-  if (
-    h > 23 ||
-    m > 59
-  ) {
+  if (h > 23 || m > 59) {
     return null;
   }
 
-  const ampm =
-    match[3]
-      ? match[3].toUpperCase()
-      : null;
+  const ampm = match[3]
+    ? match[3].toUpperCase()
+    : null;
 
-  if (
-    ampm === 'PM' &&
-    h !== 12
-  ) {
+  if (ampm === 'PM' && h !== 12) {
     h += 12;
   }
 
-  if (
-    ampm === 'AM' &&
-    h === 12
-  ) {
+  if (ampm === 'AM' && h === 12) {
     h = 0;
   }
 
-  return (
-    h * 60 +
-    m
-  );
+  return h * 60 + m;
 }
 
 
 // Always returns 12-hour time.
 function minutesToTime(mins) {
   mins =
-    (
-      (
-        mins % 1440
-      ) +
-      1440
-    ) % 1440;
+    ((mins % 1440) + 1440) % 1440;
 
-  const h =
-    Math.floor(
-      mins / 60
-    );
+  const h = Math.floor(mins / 60);
 
-  const m =
-    (
-      mins % 60
-    )
-      .toString()
-      .padStart(
-        2,
-        '0'
-      );
+  const m = (mins % 60)
+    .toString()
+    .padStart(2, '0');
 
-  const ampm =
-    h < 12
-      ? 'AM'
-      : 'PM';
+  const ampm = h < 12 ? 'AM' : 'PM';
 
-  let h12 =
-    h % 12;
+  let h12 = h % 12;
 
   if (h12 === 0) {
     h12 = 12;
@@ -173,8 +118,6 @@ function minutesToTime(mins) {
 }
 
 
-// Convert anything from the Sheet into
-// the displayed 12-hour format.
 function format12HourTime(raw) {
   if (
     raw === null ||
@@ -184,32 +127,68 @@ function format12HourTime(raw) {
     return '';
   }
 
-  const mins =
-    timeToMinutes(raw);
+  const mins = timeToMinutes(raw);
 
   if (mins === null) {
-    return raw
-      .toString();
+    return raw.toString();
   }
 
-  return minutesToTime(
-    mins
-  );
+  return minutesToTime(mins);
 }
 
 
+// ============================================================
+// TIMELINE
+//
+// IMPORTANT:
+//
+// The board is ALWAYS:
+// 5:00 AM → 4:59 AM next day.
+//
+// Internally:
+// 5:00 AM = 300
+// 12:00 AM = 1440
+// 4:59 AM = 1739
+// ============================================================
+
+const TIMELINE_START_MIN = 5 * 60;
+
+const TIMELINE_END_MIN =
+  TIMELINE_START_MIN + 1440;
+
+const INTERVAL_MIN =
+  CONFIG.INTERVAL_MINUTES || 15;
+
+const COL_WIDTH =
+  CONFIG.COLUMN_WIDTH_PX || 60;
+
+const TOTAL_COLUMNS =
+  Math.ceil(
+    (TIMELINE_END_MIN - TIMELINE_START_MIN) /
+    INTERVAL_MIN
+  );
+
+const TIMELINE_WIDTH =
+  TOTAL_COLUMNS * COL_WIDTH;
+
+
 function toTimelineMinutes(raw) {
-  const mins =
-    timeToMinutes(raw);
+  const mins = timeToMinutes(raw);
 
   if (mins === null) {
     return null;
   }
 
-  return mins <
-    TIMELINE_START_MIN
-    ? mins + 1440
-    : mins;
+  /*
+    Anything between midnight and 4:59 AM belongs
+    AFTER midnight in the airport operating day.
+  */
+
+  if (mins < TIMELINE_START_MIN) {
+    return mins + 1440;
+  }
+
+  return mins;
 }
 
 
@@ -220,19 +199,25 @@ function minutesToClockString(mins) {
 }
 
 
-// Keep boarding exactly 30 minutes
-// before departure.
-function setBoardingFromDeparture(
-  flight
-) {
+function minutesToX(mins) {
+  return (
+    (mins - TIMELINE_START_MIN) /
+    INTERVAL_MIN
+  ) * COL_WIDTH;
+}
+
+
+// ============================================================
+// BOARDING / DEPARTURE RELATIONSHIP
+// ============================================================
+
+function setBoardingFromDeparture(flight) {
   const departure =
     toTimelineMinutes(
       flight.departure
     );
 
-  if (
-    departure === null
-  ) {
+  if (departure === null) {
     return;
   }
 
@@ -243,8 +228,28 @@ function setBoardingFromDeparture(
 }
 
 
-// Change departure and automatically
-// move boarding to exactly 30 minutes before it.
+// Change departure while moving boarding
+// by the exact same amount.
+//
+// This preserves a manually-created boarding
+// offset if the user intentionally changed it.
+//
+// Example:
+// Normal:
+// Board 5:30 PM
+// Dep   6:00 PM
+//
+// Move departure +30:
+// Board 6:00 PM
+// Dep   6:30 PM
+//
+// If manually set:
+// Board 5:40 PM
+// Dep   6:00 PM
+//
+// Move departure +30:
+// Board 6:10 PM
+// Dep   6:30 PM
 function changeDepartureTime(
   flight,
   deltaMinutes
@@ -254,25 +259,34 @@ function changeDepartureTime(
       flight.departure
     );
 
-  if (
-    departure === null
-  ) {
+  if (departure === null) {
     return;
   }
 
+  const boarding =
+    toTimelineMinutes(
+      flight.boarding
+    );
+
   const newDeparture =
-    departure +
-    deltaMinutes;
+    departure + deltaMinutes;
 
   flight.departure =
     minutesToClockString(
       newDeparture
     );
 
-  flight.boarding =
-    minutesToClockString(
-      newDeparture - 30
-    );
+  if (boarding !== null) {
+    flight.boarding =
+      minutesToClockString(
+        boarding + deltaMinutes
+      );
+  } else {
+    flight.boarding =
+      minutesToClockString(
+        newDeparture - 30
+      );
+  }
 }
 
 
@@ -280,17 +294,13 @@ function changeDepartureTime(
 // OCCUPANCY
 // ============================================================
 
-function occupancyWindow(
-  flight
-) {
+function occupancyWindow(flight) {
   const dep =
     toTimelineMinutes(
       flight.departure
     );
 
-  if (
-    dep === null
-  ) {
+  if (dep === null) {
     return null;
   }
 
@@ -314,8 +324,7 @@ function occupancyWindow(
   const end =
     dep +
     (
-      flight.status ===
-      'DELAYED'
+      flight.status === 'DELAYED'
         ? 20
         : 0
     );
@@ -327,10 +336,7 @@ function occupancyWindow(
 }
 
 
-function windowsOverlap(
-  a,
-  b
-) {
+function windowsOverlap(a, b) {
   return (
     a.start < b.end &&
     b.start < a.end
@@ -343,93 +349,60 @@ function windowsOverlap(
 // ============================================================
 
 function computeConflicts() {
-  const conflicts =
-    new Map();
-
+  const conflicts = new Map();
   const byGate = {};
 
-  FLIGHTS.forEach(
-    f => {
-
-      if (
-        f.status ===
-          'CANCELLED' ||
-        f.status ===
-          'DIVERTED'
-      ) {
-        return;
-      }
-
-      if (
-        !byGate[f.gate]
-      ) {
-        byGate[f.gate] =
-          [];
-      }
-
-      byGate[f.gate].push(
-        f
-      );
+  FLIGHTS.forEach(f => {
+    if (
+      f.status === 'CANCELLED' ||
+      f.status === 'DIVERTED'
+    ) {
+      return;
     }
-  );
 
-  Object.values(
-    byGate
-  ).forEach(
-    list => {
+    if (!byGate[f.gate]) {
+      byGate[f.gate] = [];
+    }
 
-      list.sort(
-        (a, b) =>
-          (
-            toTimelineMinutes(
-              a.departure
-            ) ?? Infinity
-          ) -
-          (
-            toTimelineMinutes(
-              b.departure
-            ) ?? Infinity
-          )
-      );
+    byGate[f.gate].push(f);
+  });
 
-      for (
-        let i = 0;
-        i < list.length;
-        i++
-      ) {
-        for (
-          let j = i + 1;
-          j < list.length;
-          j++
+  Object.values(byGate).forEach(list => {
+    list.sort(
+      (a, b) =>
+        (
+          toTimelineMinutes(
+            a.departure
+          ) ?? Infinity
+        ) -
+        (
+          toTimelineMinutes(
+            b.departure
+          ) ?? Infinity
+        )
+    );
+
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const wa =
+          occupancyWindow(list[i]);
+
+        const wb =
+          occupancyWindow(list[j]);
+
+        if (
+          wa &&
+          wb &&
+          windowsOverlap(wa, wb)
         ) {
-
-          const wa =
-            occupancyWindow(
-              list[i]
-            );
-
-          const wb =
-            occupancyWindow(
-              list[j]
-            );
-
-          if (
-            wa &&
-            wb &&
-            windowsOverlap(
-              wa,
-              wb
-            )
-          ) {
-            conflicts.set(
-              list[j].id,
-              list[i].id
-            );
-          }
+          conflicts.set(
+            list[j].id,
+            list[i].id
+          );
         }
       }
     }
-  );
+  });
 
   return conflicts;
 }
@@ -439,32 +412,19 @@ function computeConflicts() {
 // AIRLINE HELPERS
 // ============================================================
 
-function normalizeAirline(
-  str
-) {
-  return (
-    str || ''
-  )
+function normalizeAirline(str) {
+  return (str || '')
     .toString()
     .trim()
     .toUpperCase();
 }
 
 
-function airlinesMatch(
-  a,
-  b
-) {
-  const na =
-    normalizeAirline(a);
+function airlinesMatch(a, b) {
+  const na = normalizeAirline(a);
+  const nb = normalizeAirline(b);
 
-  const nb =
-    normalizeAirline(b);
-
-  if (
-    !na ||
-    !nb
-  ) {
+  if (!na || !nb) {
     return false;
   }
 
@@ -476,13 +436,9 @@ function airlinesMatch(
 }
 
 
-function isWrongAirlineGate(
-  flight
-) {
+function isWrongAirlineGate(flight) {
   const gate =
-    GATE_BY_ID[
-      flight.gate
-    ];
+    GATE_BY_ID[flight.gate];
 
   if (!gate) {
     return false;
@@ -507,8 +463,7 @@ function gateHasConflict(
   const testFlight = {
     ...flight,
 
-    gate:
-      gateId,
+    gate: gateId,
 
     departure:
       minutesToClockString(
@@ -517,8 +472,7 @@ function gateHasConflict(
 
     boarding:
       minutesToClockString(
-        departureMinutes -
-        30
+        departureMinutes - 30
       )
   };
 
@@ -527,9 +481,7 @@ function gateHasConflict(
       testFlight
     );
 
-  if (
-    !testWindow
-  ) {
+  if (!testWindow) {
     return true;
   }
 
@@ -538,28 +490,92 @@ function gateHasConflict(
       f =>
         f.id !== flight.id &&
         f.gate === gateId &&
-        f.status !==
-          'CANCELLED' &&
-        f.status !==
-          'DIVERTED'
+        f.status !== 'CANCELLED' &&
+        f.status !== 'DIVERTED'
     )
-    .some(
-      f => {
+    .some(f => {
+      const otherWindow =
+        occupancyWindow(f);
 
-        const otherWindow =
-          occupancyWindow(
-            f
-          );
+      return (
+        otherWindow &&
+        windowsOverlap(
+          testWindow,
+          otherWindow
+        )
+      );
+    });
+}
 
-        return (
-          otherWindow &&
-          windowsOverlap(
-            testWindow,
-            otherWindow
-          )
-        );
-      }
-    );
+
+function findNearestAvailableTime(
+  flight,
+  gateId,
+  originalDeparture
+) {
+  // First try the current time.
+  if (
+    !gateHasConflict(
+      flight,
+      gateId,
+      originalDeparture
+    )
+  ) {
+    return {
+      departure: originalDeparture,
+      boarding:
+        originalDeparture - 30,
+      timeChanged: false,
+      timeDifference: 0
+    };
+  }
+
+  // Then search outward from the current time.
+  for (
+    let offset = INTERVAL_MIN;
+    offset <= 180;
+    offset += INTERVAL_MIN
+  ) {
+    const earlier =
+      originalDeparture - offset;
+
+    if (
+      earlier >= TIMELINE_START_MIN &&
+      !gateHasConflict(
+        flight,
+        gateId,
+        earlier
+      )
+    ) {
+      return {
+        departure: earlier,
+        boarding: earlier - 30,
+        timeChanged: true,
+        timeDifference: offset
+      };
+    }
+
+    const later =
+      originalDeparture + offset;
+
+    if (
+      later < TIMELINE_END_MIN &&
+      !gateHasConflict(
+        flight,
+        gateId,
+        later
+      )
+    ) {
+      return {
+        departure: later,
+        boarding: later - 30,
+        timeChanged: true,
+        timeDifference: offset
+      };
+    }
+  }
+
+  return null;
 }
 
 
@@ -572,9 +588,7 @@ function suggestGatesFor(
       flight.departure
     );
 
-  if (
-    departure === null
-  ) {
+  if (departure === null) {
     return [];
   }
 
@@ -585,167 +599,69 @@ function suggestGatesFor(
           g.airline,
           flight.airline
         ) &&
-        g.id !==
-          excludeGateId
+        g.id !== excludeGateId
     );
 
   const suggestions = [];
 
-  candidates.forEach(
-    gate => {
+  candidates.forEach(gate => {
+    const currentGate =
+      GATE_BY_ID[
+        excludeGateId
+      ];
 
-      const currentGate =
-        GATE_BY_ID[
-          excludeGateId
-        ];
+    const sameConcourse =
+      currentGate &&
+      gate.concourse ===
+        currentGate.concourse;
 
-      const sameConcourse =
-        currentGate &&
-        gate.concourse ===
-          currentGate.concourse;
-
-      const distance =
-        currentGate
-          ? Math.abs(
-              gate.num -
-              currentGate.num
-            )
-          : 0;
-
-      const gateScore =
-        (
-          sameConcourse
-            ? 0
-            : 1000
-        ) +
-        distance;
-
-
-      // --------------------------------------------------------
-      // OPTION 1:
-      // Same flight time, different gate.
-      // --------------------------------------------------------
-
-      if (
-        !gateHasConflict(
-          flight,
-          gate.id,
-          departure
-        )
-      ) {
-
-        suggestions.push({
-          gate:
-            gate.id,
-
-          departure:
-            departure,
-
-          boarding:
-            departure - 30,
-
-          timeChanged:
-            false,
-
-          timeDifference:
-            0,
-
-          score:
-            gateScore
-        });
-
-        return;
-      }
-
-
-      // --------------------------------------------------------
-      // OPTION 2:
-      // Same gate, but find a nearby usable
-      // flight time.
-      // --------------------------------------------------------
-
-      let bestTime =
-        null;
-
-      for (
-        let offset = 15;
-        offset <= 180;
-        offset += 15
-      ) {
-
-        const earlier =
-          departure -
-          offset;
-
-        if (
-          earlier >=
-            TIMELINE_START_MIN &&
-          !gateHasConflict(
-            flight,
-            gate.id,
-            earlier
+    const distance =
+      currentGate
+        ? Math.abs(
+            gate.num -
+            currentGate.num
           )
-        ) {
-          bestTime =
-            earlier;
+        : 0;
 
-          break;
-        }
+    const gateScore =
+      (
+        sameConcourse
+          ? 0
+          : 1000
+      ) +
+      distance;
 
-        const later =
-          departure +
-          offset;
+    const timeOption =
+      findNearestAvailableTime(
+        flight,
+        gate.id,
+        departure
+      );
 
-        if (
-          later <=
-            TIMELINE_END_MIN &&
-          !gateHasConflict(
-            flight,
-            gate.id,
-            later
-          )
-        ) {
-          bestTime =
-            later;
-
-          break;
-        }
-      }
-
-      if (
-        bestTime !== null
-      ) {
-
-        suggestions.push({
-          gate:
-            gate.id,
-
-          departure:
-            bestTime,
-
-          boarding:
-            bestTime - 30,
-
-          timeChanged:
-            true,
-
-          timeDifference:
-            Math.abs(
-              bestTime -
-              departure
-            ),
-
-          score:
-            gateScore +
-            Math.abs(
-              bestTime -
-              departure
-            ) * 0.1
-        });
-      }
+    if (!timeOption) {
+      return;
     }
-  );
 
+    suggestions.push({
+      gate: gate.id,
+
+      departure:
+        timeOption.departure,
+
+      boarding:
+        timeOption.boarding,
+
+      timeChanged:
+        timeOption.timeChanged,
+
+      timeDifference:
+        timeOption.timeDifference,
+
+      score:
+        gateScore +
+        timeOption.timeDifference * 0.1
+    });
+  });
 
   suggestions.sort(
     (a, b) =>
@@ -753,64 +669,50 @@ function suggestGatesFor(
       b.score
   );
 
-  return suggestions.slice(
-    0,
-    3
-  );
+  return suggestions.slice(0, 3);
 }
 
 
 // ============================================================
-// RENDERING
+// RENDER HELPERS
 // ============================================================
 
-function flightMatchesFilters(
-  f
-) {
+function flightMatchesFilters(f) {
   if (
-    statusFilterVal !==
-      'all' &&
-    f.status !==
-      statusFilterVal
+    statusFilterVal !== 'all' &&
+    f.status !== statusFilterVal
   ) {
     return false;
   }
 
-  if (
-    !searchTerm
-  ) {
+  if (!searchTerm) {
     return true;
   }
 
   const term =
-    searchTerm
-      .toLowerCase();
+    searchTerm.toLowerCase();
 
   return (
     (
-      f.flightNumber ||
-      ''
+      f.flightNumber || ''
     )
       .toLowerCase()
       .includes(term) ||
 
     (
-      f.gate ||
-      ''
+      f.gate || ''
     )
       .toLowerCase()
       .includes(term) ||
 
     (
-      f.to ||
-      ''
+      f.to || ''
     )
       .toLowerCase()
       .includes(term) ||
 
     (
-      f.airline ||
-      ''
+      f.airline || ''
     )
       .toLowerCase()
       .includes(term)
@@ -818,11 +720,8 @@ function flightMatchesFilters(
 }
 
 
-function statusPillClass(
-  status
-) {
+function statusPillClass(status) {
   switch (status) {
-
     case 'ON TIME':
       return 'pill-on-time';
 
@@ -844,13 +743,9 @@ function statusPillClass(
 }
 
 
-function escapeHtml(
-  str
-) {
+function escapeHtml(str) {
   const div =
-    document.createElement(
-      'div'
-    );
+    document.createElement('div');
 
   div.textContent =
     str ?? '';
@@ -868,9 +763,7 @@ function renderFlightCard(
   isConflict
 ) {
   const card =
-    document.createElement(
-      'div'
-    );
+    document.createElement('div');
 
   card.className =
     'flight-card';
@@ -878,53 +771,40 @@ function renderFlightCard(
   card.dataset.flightId =
     flight.id;
 
-  card.draggable =
-    true;
-
+  card.draggable = true;
 
   const statusClass =
     isConflict
       ? 'status-conflict'
-      : flight.status ===
-        'DELAYED'
+      : flight.status === 'DELAYED'
         ? 'status-delayed'
         : (
-            flight.status ===
-              'CANCELLED' ||
-            flight.status ===
-              'DIVERTED'
+            flight.status === 'CANCELLED' ||
+            flight.status === 'DIVERTED'
           )
             ? 'status-cancelled'
             : '';
 
-  if (
-    statusClass
-  ) {
+  if (statusClass) {
     card.classList.add(
       statusClass
     );
   }
 
-
   const stripeColor =
     CONFIG.AIRLINE_COLORS[
       flight.airline
-    ] ||
-    '#3E7BFA';
+    ] || '#3E7BFA';
 
   if (
     !isConflict &&
-    flight.status !==
-      'DELAYED' &&
-    flight.status !==
-      'CANCELLED' &&
-    flight.status !==
-      'DIVERTED'
+    flight.status !== 'DELAYED' &&
+    flight.status !== 'CANCELLED' &&
+    flight.status !== 'DIVERTED'
   ) {
     card.style.borderLeftColor =
       stripeColor;
   }
-
 
   const pillClass =
     isConflict
@@ -937,7 +817,6 @@ function renderFlightCard(
     isConflict
       ? 'CONFLICT'
       : flight.status;
-
 
   card.innerHTML = `
     <div class="fc-top">
@@ -1004,9 +883,7 @@ function renderFlightCard(
 
     ${
       !isConflict &&
-      isWrongAirlineGate(
-        flight
-      )
+      isWrongAirlineGate(flight)
         ? `
           <div class="fc-wrong-airline-note">
             On a ${escapeHtml(
@@ -1038,7 +915,6 @@ function renderFlightCard(
   card.addEventListener(
     'click',
     () => {
-
       if (
         card.classList.contains(
           'was-dragged'
@@ -1061,9 +937,6 @@ function renderFlightCard(
   card.addEventListener(
     'dragstart',
     e => {
-
-      // Never allow HTML5 gate dragging
-      // to start from a resize handle.
       if (
         e.target.closest(
           '.resize-handle'
@@ -1102,79 +975,29 @@ function renderFlightCard(
   );
 
 
-  // ==========================================================
-  // GATE DRAG END
-  // ==========================================================
-
   card.addEventListener(
     'dragend',
     () => {
-
       card.classList.remove(
         'dragging'
       );
 
-      setTimeout(
-        () => {
-          ACTIVE_DRAG =
-            null;
-        },
-        0
+      card.classList.add(
+        'was-dragged'
       );
+
+      setTimeout(() => {
+        card.classList.remove(
+          'was-dragged'
+        );
+
+        ACTIVE_DRAG =
+          null;
+      }, 100);
     }
   );
 
-
   return card;
-}
-
-
-// ============================================================
-// TIMELINE GEOMETRY
-// ============================================================
-
-const TIMELINE_START_MIN =
-  timeToMinutes(
-    CONFIG.TIMELINE_START
-  ) ?? 300;
-
-const TIMELINE_END_MIN =
-  timeToMinutes(
-    CONFIG.TIMELINE_END
-  ) ?? 1440;
-
-const INTERVAL_MIN =
-  CONFIG.INTERVAL_MINUTES ||
-  15;
-
-const COL_WIDTH =
-  CONFIG.COLUMN_WIDTH_PX ||
-  60;
-
-const TOTAL_COLUMNS =
-  Math.ceil(
-    (
-      TIMELINE_END_MIN -
-      TIMELINE_START_MIN
-    ) /
-    INTERVAL_MIN
-  );
-
-const TIMELINE_WIDTH =
-  TOTAL_COLUMNS *
-  COL_WIDTH;
-
-
-function minutesToX(
-  mins
-) {
-  return (
-    (
-      mins -
-      TIMELINE_START_MIN
-    ) /
-    INTERVAL_MIN
-  ) * COL_WIDTH;
 }
 
 
@@ -1183,34 +1006,26 @@ function minutesToX(
 // ============================================================
 
 function renderTimeHeader() {
-
   const header =
-    document.createElement(
-      'div'
-    );
+    document.createElement('div');
 
   header.className =
     'time-header';
 
   header.style.width =
-    TIMELINE_WIDTH +
-    'px';
-
+    TIMELINE_WIDTH + 'px';
 
   for (
     let i = 0;
     i < TOTAL_COLUMNS;
     i++
   ) {
-
     const mins =
       TIMELINE_START_MIN +
       i * INTERVAL_MIN;
 
     const cell =
-      document.createElement(
-        'div'
-      );
+      document.createElement('div');
 
     cell.className =
       'time-cell' +
@@ -1221,15 +1036,18 @@ function renderTimeHeader() {
       );
 
     cell.style.width =
-      COL_WIDTH +
-      'px';
+      COL_WIDTH + 'px';
 
-    cell.textContent =
-      mins % 60 === 0
-        ? minutesToTime(
-            mins
-          )
-        : '';
+    // Show every hour.
+    if (mins % 60 === 0) {
+      cell.textContent =
+        minutesToClockString(
+          mins
+        );
+    } else {
+      cell.textContent =
+        '';
+    }
 
     header.appendChild(
       cell
@@ -1245,7 +1063,6 @@ function renderTimeHeader() {
 // ============================================================
 
 function renderBoard() {
-
   const board =
     document.getElementById(
       'board'
@@ -1255,6 +1072,7 @@ function renderBoard() {
     console.error(
       'Gate Ops: #board element not found.'
     );
+
     return;
   }
 
@@ -1268,33 +1086,25 @@ function renderBoard() {
     conflicts
   );
 
-
   const scrollArea =
-    document.createElement(
-      'div'
-    );
+    document.createElement('div');
 
   scrollArea.className =
     'timeline-scroll';
 
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // HEADER
-  // ----------------------------------------------------------
+  // ==========================================================
 
   const headerRow =
-    document.createElement(
-      'div'
-    );
+    document.createElement('div');
 
   headerRow.className =
     'timeline-header-row';
 
-
   const corner =
-    document.createElement(
-      'div'
-    );
+    document.createElement('div');
 
   corner.className =
     'corner-cell';
@@ -1315,13 +1125,12 @@ function renderBoard() {
   );
 
 
-  // ----------------------------------------------------------
+  // ==========================================================
   // CONCOURSES
-  // ----------------------------------------------------------
+  // ==========================================================
 
   CONCOURSES.forEach(
     concourse => {
-
       const gatesInConcourse =
         GATE_LIST.filter(
           g =>
@@ -1329,30 +1138,25 @@ function renderBoard() {
             concourse
         );
 
-      const airlinesHere =
-        [
-          ...new Set(
-            gatesInConcourse.map(
-              g =>
-                g.airline
-            )
+      const airlinesHere = [
+        ...new Set(
+          gatesInConcourse.map(
+            g =>
+              g.airline
           )
-        ];
+        )
+      ];
 
 
       const labelRow =
-        document.createElement(
-          'div'
-        );
+        document.createElement('div');
 
       labelRow.className =
         'concourse-label-row';
 
 
       const labelCorner =
-        document.createElement(
-          'div'
-        );
+        document.createElement('div');
 
       labelCorner.className =
         'corner-cell concourse-corner';
@@ -1363,16 +1167,13 @@ function renderBoard() {
 
 
       const labelBody =
-        document.createElement(
-          'div'
-        );
+        document.createElement('div');
 
       labelBody.className =
         'concourse-label-body';
 
       labelBody.style.width =
-        TIMELINE_WIDTH +
-        'px';
+        TIMELINE_WIDTH + 'px';
 
       labelBody.innerHTML = `
         <span class="concourse-title">
@@ -1399,26 +1200,21 @@ function renderBoard() {
       );
 
 
-      // --------------------------------------------------------
+      // ========================================================
       // GATES
-      // --------------------------------------------------------
+      // ========================================================
 
       gatesInConcourse.forEach(
         gate => {
-
           const row =
-            document.createElement(
-              'div'
-            );
+            document.createElement('div');
 
           row.className =
             'timeline-row';
 
 
           const gateIdEl =
-            document.createElement(
-              'div'
-            );
+            document.createElement('div');
 
           gateIdEl.className =
             'gate-id-cell';
@@ -1428,16 +1224,19 @@ function renderBoard() {
 
 
           const track =
-            document.createElement(
-              'div'
-            );
+            document.createElement('div');
 
           track.className =
             'gate-track';
 
+          /*
+            CRITICAL:
+            The track is always the complete 24-hour
+            operating day from 5 AM → 5 AM.
+          */
+
           track.style.width =
-            TIMELINE_WIDTH +
-            'px';
+            TIMELINE_WIDTH + 'px';
 
           track.style.backgroundSize =
             `${COL_WIDTH}px 100%`;
@@ -1452,85 +1251,93 @@ function renderBoard() {
           const flightsHere =
             FLIGHTS.filter(
               f =>
-                f.gate ===
-                  gate.id &&
-                flightMatchesFilters(
-                  f
-                )
+                f.gate === gate.id &&
+                flightMatchesFilters(f)
             );
 
 
-          flightsHere.forEach(
-            f => {
+          flightsHere.forEach(f => {
+            const win =
+              occupancyWindow(f);
 
-              const win =
-                occupancyWindow(
-                  f
-                );
-
-              const card =
-                renderFlightCard(
-                  f,
-                  conflicts.has(
-                    f.id
-                  )
-                );
-
-
-              if (win) {
-
-                const left =
-                  Math.max(
-                    minutesToX(
-                      win.start
-                    ),
-                    0
-                  );
-
-                const width =
-                  Math.max(
-                    minutesToX(
-                      win.end
-                    ) -
-                    minutesToX(
-                      win.start
-                    ),
-                    40
-                  );
-
-                card.style.position =
-                  'absolute';
-
-                card.style.left =
-                  left + 'px';
-
-                card.style.width =
-                  width + 'px';
-
-              } else {
-
-                card.style.position =
-                  'absolute';
-
-                card.style.left =
-                  '0px';
-
-                card.style.width =
-                  '150px';
-              }
-
-
-              track.appendChild(
-                card
+            const card =
+              renderFlightCard(
+                f,
+                conflicts.has(f.id)
               );
 
+            if (win) {
+              let left =
+                minutesToX(
+                  win.start
+                );
 
-              attachResizeHandlers(
-                card,
-                f
-              );
+              let right =
+                minutesToX(
+                  win.end
+                );
+
+              /*
+                Keep cards inside the 5 AM → 5 AM
+                operating-day timeline.
+              */
+
+              left =
+                Math.max(
+                  left,
+                  0
+                );
+
+              right =
+                Math.min(
+                  right,
+                  TIMELINE_WIDTH
+                );
+
+              let width =
+                right - left;
+
+              /*
+                If a flight begins before 5 AM
+                or extends beyond 5 AM, keep
+                its visible portion on screen.
+              */
+
+              width =
+                Math.max(
+                  width,
+                  40
+                );
+
+              card.style.position =
+                'absolute';
+
+              card.style.left =
+                left + 'px';
+
+              card.style.width =
+                width + 'px';
+
+            } else {
+              card.style.position =
+                'absolute';
+
+              card.style.left =
+                '0px';
+
+              card.style.width =
+                '150px';
             }
-          );
+
+            track.appendChild(
+              card
+            );
+
+            attachResizeHandlers(
+              card,
+              f
+            );
+          });
 
 
           attachDropHandlers(
@@ -1559,21 +1366,21 @@ function renderBoard() {
     scrollArea
   );
 
-  // Keep the bottom button alive
-  // after every board re-render.
   setupBottomScrollButton();
 }
 
 
 // ============================================================
 // RESIZE HANDLERS
+//
+// Pointer Events are used instead of old mouse-only handlers.
+// This makes the resize handles much more reliable.
 // ============================================================
 
 function attachResizeHandlers(
   card,
   flight
 ) {
-
   const leftHandle =
     card.querySelector(
       '.resize-left'
@@ -1584,6 +1391,10 @@ function attachResizeHandlers(
       '.resize-right'
     );
 
+  if (!leftHandle && !rightHandle) {
+    return;
+  }
+
   const pxPerMin =
     COL_WIDTH /
     INTERVAL_MIN;
@@ -1593,15 +1404,15 @@ function attachResizeHandlers(
     e,
     isLeft
   ) {
-
-    e.stopPropagation();
     e.preventDefault();
+    e.stopPropagation();
 
-    // IMPORTANT:
-    // Temporarily disable HTML5 gate dragging
-    // while resizing.
     card.draggable =
       false;
+
+    card.classList.add(
+      'resizing'
+    );
 
     const startX =
       e.clientX;
@@ -1616,10 +1427,26 @@ function attachResizeHandlers(
         card.style.width
       ) || 40;
 
+    let currentX =
+      startX;
 
-    function onMove(
-      ev
-    ) {
+    const handle =
+      e.currentTarget;
+
+    try {
+      if (
+        handle.setPointerCapture
+      ) {
+        handle.setPointerCapture(
+          e.pointerId
+        );
+      }
+    } catch (_) {}
+
+
+    function onMove(ev) {
+      currentX =
+        ev.clientX;
 
       ev.preventDefault();
 
@@ -1629,91 +1456,94 @@ function attachResizeHandlers(
 
 
       if (isLeft) {
-
         let newLeft =
-          baseLeft +
-          dx;
+          baseLeft + dx;
 
         let newWidth =
-          baseWidth -
-          dx;
+          baseWidth - dx;
 
-        if (
-          newWidth < 30
-        ) {
-
+        if (newWidth < 30) {
           newWidth =
             30;
 
           newLeft =
             baseLeft +
-            (
-              baseWidth -
-              30
-            );
-        }
-
-        card.style.left =
-          newLeft +
-          'px';
-
-        card.style.width =
-          newWidth +
-          'px';
-
-      } else {
-
-        let newWidth =
-          baseWidth +
-          dx;
-
-        if (
-          newWidth < 30
-        ) {
-          newWidth =
+            baseWidth -
             30;
         }
 
+        newLeft =
+          Math.max(
+            0,
+            newLeft
+          );
+
+        card.style.left =
+          newLeft + 'px';
+
         card.style.width =
-          newWidth +
-          'px';
+          newWidth + 'px';
+
+      } else {
+        let newWidth =
+          baseWidth + dx;
+
+        newWidth =
+          Math.max(
+            30,
+            newWidth
+          );
+
+        newWidth =
+          Math.min(
+            TIMELINE_WIDTH -
+              baseLeft,
+            newWidth
+          );
+
+        card.style.width =
+          newWidth + 'px';
       }
     }
 
 
-    function onUp(
-      ev
-    ) {
-
+    function onUp() {
       document.removeEventListener(
-        'mousemove',
+        'pointermove',
         onMove
       );
 
       document.removeEventListener(
-        'mouseup',
+        'pointerup',
+        onUp
+      );
+
+      document.removeEventListener(
+        'pointercancel',
         onUp
       );
 
       card.draggable =
         true;
 
+      card.classList.remove(
+        'resizing'
+      );
 
       const dx =
-        ev.clientX -
+        currentX -
         startX;
 
-      const deltaMinRaw =
+      let deltaMin =
         dx /
         pxPerMin;
 
-      const deltaMin =
+      deltaMin =
         Math.round(
-          deltaMinRaw /
+          deltaMin /
           INTERVAL_MIN
         ) *
         INTERVAL_MIN;
-
 
       if (
         deltaMin === 0
@@ -1726,11 +1556,10 @@ function attachResizeHandlers(
       // --------------------------------------------------------
       // LEFT HANDLE
       //
-      // Change BOARDING only.
+      // Manually change BOARDING only.
       // --------------------------------------------------------
 
       if (isLeft) {
-
         const boarding =
           toTimelineMinutes(
             flight.boarding
@@ -1739,25 +1568,24 @@ function attachResizeHandlers(
         if (
           boarding !== null
         ) {
-
           flight.boarding =
             minutesToClockString(
               boarding +
               deltaMin
             );
         }
+      }
 
 
       // --------------------------------------------------------
       // RIGHT HANDLE
       //
       // Change DEPARTURE.
-      // Boarding automatically becomes
-      // exactly 30 minutes before departure.
+      //
+      // BOARDING MOVES WITH DEPARTURE.
       // --------------------------------------------------------
 
-      } else {
-
+      else {
         changeDepartureTime(
           flight,
           deltaMin
@@ -1767,50 +1595,44 @@ function attachResizeHandlers(
 
       renderBoard();
 
-
       if (SHEET_URL) {
-
         pushFlightToSheet(
           flight
-        ).catch(
-          err => {
+        ).catch(err => {
+          console.error(
+            'Time sync failed:',
+            err
+          );
 
-            console.error(
-              'Time sync failed:',
-              err
-            );
-
-            alert(
-              'The time changed locally, but could not sync to the sheet.'
-            );
-          }
-        );
+          alert(
+            'The time changed locally, but could not sync to the sheet.'
+          );
+        });
       }
     }
 
 
     document.addEventListener(
-      'mousemove',
+      'pointermove',
       onMove
     );
 
     document.addEventListener(
-      'mouseup',
+      'pointerup',
+      onUp
+    );
+
+    document.addEventListener(
+      'pointercancel',
       onUp
     );
   }
 
 
-  if (
-    leftHandle
-  ) {
-
+  if (leftHandle) {
     leftHandle.addEventListener(
-      'mousedown',
+      'pointerdown',
       e => {
-        e.stopPropagation();
-        e.preventDefault();
-
         startResize(
           e,
           true
@@ -1820,16 +1642,10 @@ function attachResizeHandlers(
   }
 
 
-  if (
-    rightHandle
-  ) {
-
+  if (rightHandle) {
     rightHandle.addEventListener(
-      'mousedown',
+      'pointerdown',
       e => {
-        e.stopPropagation();
-        e.preventDefault();
-
         startResize(
           e,
           false
@@ -1847,11 +1663,9 @@ function attachResizeHandlers(
 function attachDropHandlers(
   track
 ) {
-
   track.addEventListener(
     'dragover',
     e => {
-
       e.preventDefault();
 
       e.dataTransfer.dropEffect =
@@ -1867,7 +1681,6 @@ function attachDropHandlers(
   track.addEventListener(
     'dragleave',
     () => {
-
       track.classList.remove(
         'drag-over'
       );
@@ -1878,13 +1691,11 @@ function attachDropHandlers(
   track.addEventListener(
     'drop',
     e => {
-
       e.preventDefault();
 
       track.classList.remove(
         'drag-over'
       );
-
 
       const flightId =
         e.dataTransfer.getData(
@@ -1896,7 +1707,6 @@ function attachDropHandlers(
 
       const gateOwner =
         track.dataset.airline;
-
 
       handleGateDrop(
         flightId,
@@ -1917,7 +1727,6 @@ function handleGateDrop(
   newGate,
   gateOwner
 ) {
-
   const flight =
     FLIGHTS.find(
       f =>
@@ -1932,12 +1741,10 @@ function handleGateDrop(
     return;
   }
 
-
   if (
     flight.gate ===
     newGate
   ) {
-
     ACTIVE_DRAG =
       null;
 
@@ -1952,14 +1759,12 @@ function handleGateDrop(
       flight.airline
     )
   ) {
-
     const proceed =
       confirm(
         `Gate ${newGate} belongs to ${gateOwner}, but ${flight.flightNumber} is a ${flight.airline} flight.\n\nMove it here anyway?`
       );
 
     if (!proceed) {
-
       ACTIVE_DRAG =
         null;
 
@@ -1973,12 +1778,12 @@ function handleGateDrop(
   const oldGate =
     flight.gate;
 
+  /*
+    GATE MOVE ONLY.
 
-  // ----------------------------------------------------------
-  // GATE MOVE ONLY.
-  //
-  // TIMES ARE NEVER TOUCHED HERE.
-  // ----------------------------------------------------------
+    Boarding and departure are deliberately
+    untouched here.
+  */
 
   flight.gate =
     newGate;
@@ -1990,27 +1795,23 @@ function handleGateDrop(
 
 
   if (SHEET_URL) {
-
     pushFlightToSheet(
       flight
-    ).catch(
-      err => {
+    ).catch(err => {
+      console.error(
+        'Gate sync failed:',
+        err
+      );
 
-        console.error(
-          'Gate sync failed:',
-          err
-        );
+      flight.gate =
+        oldGate;
 
-        flight.gate =
-          oldGate;
+      renderBoard();
 
-        renderBoard();
-
-        alert(
-          'Could not save the gate change to the sheet. The gate was reverted.'
-        );
-      }
-    );
+      alert(
+        'Could not save the gate change to the sheet. The gate was reverted.'
+      );
+    });
   }
 }
 
@@ -2022,7 +1823,6 @@ function handleGateDrop(
 function updateConflictBanner(
   conflicts
 ) {
-
   const banner =
     document.getElementById(
       'conflictBanner'
@@ -2032,12 +1832,10 @@ function updateConflictBanner(
     return;
   }
 
-
   if (
     conflicts.size ===
     0
   ) {
-
     banner.classList.add(
       'hidden'
     );
@@ -2045,16 +1843,12 @@ function updateConflictBanner(
     return;
   }
 
-
   banner.classList.remove(
     'hidden'
   );
 
-
   const names =
-    [
-      ...conflicts.keys()
-    ]
+    [...conflicts.keys()]
       .map(
         id =>
           FLIGHTS.find(
@@ -2069,7 +1863,6 @@ function updateConflictBanner(
           f.flightNumber
       );
 
-
   banner.textContent =
     `⚠ ${conflicts.size} gate conflict${
       conflicts.size > 1
@@ -2082,11 +1875,10 @@ function updateConflictBanner(
 
 
 // ============================================================
-// FLIGHT MODAL
+// AIRLINE OPTIONS
 // ============================================================
 
 function populateAirlineOptions() {
-
   const select =
     document.getElementById(
       'f_airline'
@@ -2095,7 +1887,6 @@ function populateAirlineOptions() {
   if (!select) {
     return;
   }
-
 
   const fromConfig =
     CONFIG.GATE_MAP.map(
@@ -2109,7 +1900,6 @@ function populateAirlineOptions() {
         f.airline
     );
 
-
   const airlines =
     [
       ...new Set([
@@ -2119,7 +1909,6 @@ function populateAirlineOptions() {
     ]
       .filter(Boolean)
       .sort();
-
 
   select.innerHTML =
     airlines
@@ -2136,7 +1925,6 @@ function populateAirlineOptions() {
 
 
 function populateGateDatalist() {
-
   const list =
     document.getElementById(
       'gateList'
@@ -2145,7 +1933,6 @@ function populateGateDatalist() {
   if (!list) {
     return;
   }
-
 
   list.innerHTML =
     GATE_LIST
@@ -2160,6 +1947,85 @@ function populateGateDatalist() {
 
 
 // ============================================================
+// TIME INPUT HELPERS
+// ============================================================
+
+function setTimeInputValue(
+  id,
+  value
+) {
+  const input =
+    document.getElementById(id);
+
+  if (!input) {
+    return;
+  }
+
+  /*
+    If the HTML uses <input type="time">,
+    the browser requires HH:mm internally.
+
+    If it is a normal text input,
+    show 12-hour AM/PM.
+  */
+
+  if (
+    input.type === 'time'
+  ) {
+    const mins =
+      timeToMinutes(value);
+
+    input.value =
+      mins === null
+        ? ''
+        : minutesToTimeValue(mins);
+  } else {
+    input.value =
+      format12HourTime(value);
+  }
+}
+
+
+function getTimeInputValue(id) {
+  const input =
+    document.getElementById(id);
+
+  if (!input) {
+    return '';
+  }
+
+  return input.value;
+}
+
+
+function minutesToTimeValue(
+  mins
+) {
+  mins =
+    (
+      (
+        mins % 1440
+      ) +
+      1440
+    ) % 1440;
+
+  const h =
+    Math.floor(
+      mins / 60
+    );
+
+  const m =
+    mins % 60;
+
+  return (
+    h.toString().padStart(2, '0') +
+    ':' +
+    m.toString().padStart(2, '0')
+  );
+}
+
+
+// ============================================================
 // SUGGESTION UI
 // ============================================================
 
@@ -2167,7 +2033,6 @@ function renderSuggestions(
   flight,
   suggestions
 ) {
-
   const box =
     document.getElementById(
       'suggestBox'
@@ -2177,16 +2042,13 @@ function renderSuggestions(
     return;
   }
 
-
   box.classList.remove(
     'hidden'
   );
 
-
   if (
     !suggestions.length
   ) {
-
     box.innerHTML = `
       <strong>
         No open gate/time combinations found.
@@ -2214,11 +2076,7 @@ function renderSuggestions(
 
       ${suggestions
         .map(
-          (
-            suggestion,
-            index
-          ) => {
-
+          (suggestion, index) => {
             const newDeparture =
               minutesToClockString(
                 suggestion.departure
@@ -2269,7 +2127,7 @@ function renderSuggestions(
                         class="suggest-use-time"
                         data-index="${index}"
                       >
-                        Move to ${
+                        Go to Gate ${
                           escapeHtml(
                             suggestion.gate
                           )
@@ -2287,7 +2145,7 @@ function renderSuggestions(
                         class="suggest-use-time"
                         data-index="${index}"
                       >
-                        Move to ${
+                        Go to Gate ${
                           escapeHtml(
                             suggestion.gate
                           )
@@ -2313,125 +2171,123 @@ function renderSuggestions(
     </div>
 
     <div class="suggestion-note">
-      You can always move to a suggested gate
-      without changing the flight time.
+      "Gate only" ALWAYS keeps the current
+      boarding and departure times.
     </div>
   `;
 
 
   // ----------------------------------------------------------
-  // GATE + TIME BUTTON
+  // GATE + TIME
   // ----------------------------------------------------------
 
   box
     .querySelectorAll(
       '.suggest-use-time'
     )
-    .forEach(
-      button => {
+    .forEach(button => {
+      button.addEventListener(
+        'click',
+        () => {
+          const index =
+            parseInt(
+              button.dataset.index,
+              10
+            );
 
-        button.addEventListener(
-          'click',
-          () => {
+          const suggestion =
+            suggestions[index];
 
-            const index =
-              parseInt(
-                button.dataset.index,
-                10
-              );
+          if (!suggestion) {
+            return;
+          }
 
-            const suggestion =
-              suggestions[
-                index
-              ];
-
-            if (!suggestion) {
-              return;
-            }
-
-
+          const gateInput =
             document.getElementById(
               'f_gate'
-            ).value =
+            );
+
+          if (gateInput) {
+            gateInput.value =
               suggestion.gate;
-
-
-            document.getElementById(
-              'f_boarding'
-            ).value =
-              minutesToClockString(
-                suggestion.boarding
-              );
-
-
-            document.getElementById(
-              'f_departure'
-            ).value =
-              minutesToClockString(
-                suggestion.departure
-              );
           }
-        );
-      }
-    );
+
+          setTimeInputValue(
+            'f_boarding',
+            minutesToClockString(
+              suggestion.boarding
+            )
+          );
+
+          setTimeInputValue(
+            'f_departure',
+            minutesToClockString(
+              suggestion.departure
+            )
+          );
+        }
+      );
+    });
 
 
   // ----------------------------------------------------------
-  // GATE ONLY BUTTON
+  // GATE ONLY
   // ----------------------------------------------------------
 
   box
     .querySelectorAll(
       '.suggest-gate-only'
     )
-    .forEach(
-      button => {
+    .forEach(button => {
+      button.addEventListener(
+        'click',
+        () => {
+          const index =
+            parseInt(
+              button.dataset.index,
+              10
+            );
 
-        button.addEventListener(
-          'click',
-          () => {
+          const suggestion =
+            suggestions[index];
 
-            const index =
-              parseInt(
-                button.dataset.index,
-                10
-              );
+          if (!suggestion) {
+            return;
+          }
 
-            const suggestion =
-              suggestions[
-                index
-              ];
-
-            if (!suggestion) {
-              return;
-            }
-
-
+          const gateInput =
             document.getElementById(
               'f_gate'
-            ).value =
+            );
+
+          if (gateInput) {
+            gateInput.value =
               suggestion.gate;
-
-
-            // VERY IMPORTANT:
-            // Boarding and departure are NOT changed.
           }
-        );
-      }
-    );
+
+          // IMPORTANT:
+          // Boarding and departure are NOT changed.
+        }
+      );
+    });
 }
 
 
 // ============================================================
-// OPEN FLIGHT MODAL
+// MODAL
 // ============================================================
+
+let MODAL_BOARDING_MANUAL =
+  false;
+
+let MODAL_LAST_DEPARTURE =
+  '';
+
 
 function openFlightModal(
   flightId
 ) {
-
   populateAirlineOptions();
-
 
   const modal =
     document.getElementById(
@@ -2440,7 +2296,6 @@ function openFlightModal(
 
   const isEdit =
     !!flightId;
-
 
   const flight =
     isEdit
@@ -2451,14 +2306,12 @@ function openFlightModal(
         )
       : null;
 
-
   if (
     isEdit &&
     !flight
   ) {
     return;
   }
-
 
   document.getElementById(
     'modalTitle'
@@ -2467,14 +2320,12 @@ function openFlightModal(
       ? 'Edit Flight'
       : 'Add Flight';
 
-
   document.getElementById(
     'deleteFlightBtn'
   ).classList.toggle(
     'hidden',
     !isEdit
   );
-
 
   document.getElementById(
     'suggestBox'
@@ -2524,24 +2375,19 @@ function openFlightModal(
       : '';
 
 
-  document.getElementById(
-    'f_boarding'
-  ).value =
+  setTimeInputValue(
+    'f_boarding',
     isEdit
-      ? format12HourTime(
-          flight.boarding
-        )
-      : '';
+      ? flight.boarding
+      : ''
+  );
 
-
-  document.getElementById(
-    'f_departure'
-  ).value =
+  setTimeInputValue(
+    'f_departure',
     isEdit
-      ? format12HourTime(
-          flight.departure
-        )
-      : '';
+      ? flight.departure
+      : ''
+  );
 
 
   document.getElementById(
@@ -2560,15 +2406,44 @@ function openFlightModal(
       : '';
 
 
-  // ----------------------------------------------------------
-  // SUGGESTIONS
-  // ----------------------------------------------------------
+  // Determine whether boarding was already
+  // manually changed from the normal 30-minute rule.
 
   if (isEdit) {
+    const dep =
+      toTimelineMinutes(
+        flight.departure
+      );
 
+    const boarding =
+      toTimelineMinutes(
+        flight.boarding
+      );
+
+    MODAL_BOARDING_MANUAL =
+      dep !== null &&
+      boarding !== null &&
+      dep - boarding !== 30;
+
+  } else {
+    MODAL_BOARDING_MANUAL =
+      false;
+  }
+
+
+  MODAL_LAST_DEPARTURE =
+    getTimeInputValue(
+      'f_departure'
+    );
+
+
+  // ==========================================================
+  // SUGGESTIONS
+  // ==========================================================
+
+  if (isEdit) {
     const conflicts =
       computeConflicts();
-
 
     if (
       conflicts.has(
@@ -2577,13 +2452,11 @@ function openFlightModal(
       flight.status ===
         'DELAYED'
     ) {
-
       const suggestions =
         suggestGatesFor(
           flight,
           flight.gate
         );
-
 
       renderSuggestions(
         flight,
@@ -2592,7 +2465,6 @@ function openFlightModal(
     }
   }
 
-
   modal.classList.remove(
     'hidden'
   );
@@ -2600,18 +2472,147 @@ function openFlightModal(
 
 
 function closeFlightModal() {
-
   const modal =
     document.getElementById(
       'flightModal'
     );
 
   if (modal) {
-
     modal.classList.add(
       'hidden'
     );
   }
+}
+
+
+// ============================================================
+// LIVE MODAL TIME RELATIONSHIP
+// ============================================================
+
+const departureInput =
+  document.getElementById(
+    'f_departure'
+  );
+
+const boardingInput =
+  document.getElementById(
+    'f_boarding'
+  );
+
+
+if (boardingInput) {
+  boardingInput.addEventListener(
+    'input',
+    () => {
+      MODAL_BOARDING_MANUAL =
+        true;
+    }
+  );
+
+  boardingInput.addEventListener(
+    'change',
+    () => {
+      MODAL_BOARDING_MANUAL =
+        true;
+    }
+  );
+}
+
+
+if (departureInput) {
+  departureInput.addEventListener(
+    'input',
+    () => {
+      updateModalBoardingFromDeparture();
+    }
+  );
+
+  departureInput.addEventListener(
+    'change',
+    () => {
+      updateModalBoardingFromDeparture();
+    }
+  );
+}
+
+
+function updateModalBoardingFromDeparture() {
+  const departure =
+    getTimeInputValue(
+      'f_departure'
+    );
+
+  const newDeparture =
+    timeToMinutes(
+      departure
+    );
+
+  if (
+    newDeparture === null
+  ) {
+    return;
+  }
+
+
+  /*
+    If the boarding time is still following
+    the normal rule, keep it exactly 30 minutes
+    before departure.
+  */
+
+  if (
+    !MODAL_BOARDING_MANUAL
+  ) {
+    setTimeInputValue(
+      'f_boarding',
+      minutesToClockString(
+        newDeparture - 30
+      )
+    );
+
+    MODAL_LAST_DEPARTURE =
+      departure;
+
+    return;
+  }
+
+
+  /*
+    If the user manually changed boarding,
+    preserve their custom offset when departure moves.
+  */
+
+  const oldDeparture =
+    timeToMinutes(
+      MODAL_LAST_DEPARTURE
+    );
+
+  const currentBoarding =
+    timeToMinutes(
+      getTimeInputValue(
+        'f_boarding'
+      )
+    );
+
+  if (
+    oldDeparture !== null &&
+    currentBoarding !== null
+  ) {
+    const delta =
+      newDeparture -
+      oldDeparture;
+
+    setTimeInputValue(
+      'f_boarding',
+      minutesToClockString(
+        currentBoarding +
+        delta
+      )
+    );
+  }
+
+  MODAL_LAST_DEPARTURE =
+    departure;
 }
 
 
@@ -2626,13 +2627,10 @@ const flightForm =
 
 
 if (flightForm) {
-
   flightForm.addEventListener(
     'submit',
     e => {
-
       e.preventDefault();
-
 
       const id =
         document.getElementById(
@@ -2640,14 +2638,12 @@ if (flightForm) {
         ).value ||
         `f_${Date.now()}`;
 
-
       const existingIdx =
         FLIGHTS.findIndex(
           f =>
             f.id ===
             id
         );
-
 
       const previousFlight =
         existingIdx >= 0
@@ -2659,8 +2655,22 @@ if (flightForm) {
           : null;
 
 
-      const flightData = {
+      let boarding =
+        format12HourTime(
+          getTimeInputValue(
+            'f_boarding'
+          )
+        );
 
+      const departure =
+        format12HourTime(
+          getTimeInputValue(
+            'f_departure'
+          )
+        );
+
+
+      const flightData = {
         id,
 
         airline:
@@ -2687,19 +2697,9 @@ if (flightForm) {
             .trim()
             .toUpperCase(),
 
-        boarding:
-          format12HourTime(
-            document.getElementById(
-              'f_boarding'
-            ).value
-          ),
+        boarding,
 
-        departure:
-          format12HourTime(
-            document.getElementById(
-              'f_departure'
-            ).value
-          ),
+        departure,
 
         status:
           document.getElementById(
@@ -2713,21 +2713,27 @@ if (flightForm) {
       };
 
 
-      // --------------------------------------------------------
-      // MANUAL TIME RULE
-      //
-      // If departure was changed and boarding was NOT
-      // manually changed, automatically keep boarding
-      // exactly 30 minutes before departure.
-      //
-      // If the user manually changed BOTH, their manual
-      // boarding value is respected.
-      // --------------------------------------------------------
+      // ========================================================
+      // TIME RULE
+      // ========================================================
+
+      if (
+        !previousFlight
+      ) {
+        if (
+          flightData.departure &&
+          !flightData.boarding
+        ) {
+          setBoardingFromDeparture(
+            flightData
+          );
+        }
+      }
+
 
       if (
         previousFlight
       ) {
-
         const oldDeparture =
           toTimelineMinutes(
             previousFlight.departure
@@ -2748,63 +2754,43 @@ if (flightForm) {
             flightData.boarding
           );
 
-
         const departureChanged =
-          oldDeparture !==
-            null &&
-          newDeparture !==
-            null &&
+          oldDeparture !== null &&
+          newDeparture !== null &&
           oldDeparture !==
             newDeparture;
 
-
         const boardingChanged =
-          oldBoarding !==
-            null &&
-          newBoarding !==
-            null &&
+          oldBoarding !== null &&
+          newBoarding !== null &&
           oldBoarding !==
             newBoarding;
 
+        /*
+          Departure changed but boarding didn't:
+          automatically make boarding 30 minutes prior.
+        */
 
         if (
           departureChanged &&
           !boardingChanged
         ) {
-
           flightData.boarding =
             minutesToClockString(
-              newDeparture -
-              30
+              newDeparture - 30
             );
         }
       }
 
 
-      // For a brand-new flight, if departure exists
-      // but boarding is blank, automatically create
-      // boarding 30 minutes before departure.
-      if (
-        !previousFlight &&
-        flightData.departure &&
-        !flightData.boarding
-      ) {
-
-        setBoardingFromDeparture(
-          flightData
-        );
-      }
-
-
-      // --------------------------------------------------------
+      // ========================================================
       // AIRLINE / GATE CHECK
-      // --------------------------------------------------------
+      // ========================================================
 
       const gateInfo =
         GATE_BY_ID[
           flightData.gate
         ];
-
 
       if (
         gateInfo &&
@@ -2813,7 +2799,6 @@ if (flightForm) {
           flightData.airline
         )
       ) {
-
         const proceed =
           confirm(
             `Gate ${flightData.gate} belongs to ${gateInfo.airline}, but this is a ${flightData.airline} flight.\n\nSave it here anyway?`
@@ -2825,77 +2810,63 @@ if (flightForm) {
       }
 
 
-      // --------------------------------------------------------
+      // ========================================================
       // SAVE LOCALLY
-      // --------------------------------------------------------
+      // ========================================================
 
       if (
         existingIdx >= 0
       ) {
-
         FLIGHTS[
           existingIdx
         ] =
           flightData;
-
       } else {
-
         FLIGHTS.push(
           flightData
         );
       }
-
 
       renderBoard();
 
       closeFlightModal();
 
 
-      // --------------------------------------------------------
+      // ========================================================
       // SAVE TO SHEET
-      // --------------------------------------------------------
+      // ========================================================
 
       if (SHEET_URL) {
-
         pushFlightToSheet(
           flightData
-        ).catch(
-          err => {
+        ).catch(err => {
+          console.error(
+            'Flight save failed:',
+            err
+          );
 
-            console.error(
-              'Flight save failed:',
-              err
-            );
-
-
-            if (
-              existingIdx >= 0
-            ) {
-
-              FLIGHTS[
-                existingIdx
-              ] =
-                previousFlight;
-
-            } else {
-
-              FLIGHTS =
-                FLIGHTS.filter(
-                  f =>
-                    f.id !==
-                    id
-                );
-            }
-
-
-            renderBoard();
-
-
-            alert(
-              'Could not save the flight to the sheet. The change was reverted.'
-            );
+          if (
+            existingIdx >= 0
+          ) {
+            FLIGHTS[
+              existingIdx
+            ] =
+              previousFlight;
+          } else {
+            FLIGHTS =
+              FLIGHTS.filter(
+                f =>
+                  f.id !==
+                  id
+              );
           }
-        );
+
+          renderBoard();
+
+          alert(
+            'Could not save the flight to the sheet. The change was reverted.'
+          );
+        });
       }
     }
   );
@@ -2912,24 +2883,18 @@ const deleteFlightBtn =
   );
 
 
-if (
-  deleteFlightBtn
-) {
-
+if (deleteFlightBtn) {
   deleteFlightBtn.addEventListener(
     'click',
     () => {
-
       const id =
         document.getElementById(
           'f_id'
         ).value;
 
-
       if (!id) {
         return;
       }
-
 
       if (
         !confirm(
@@ -2939,14 +2904,12 @@ if (
         return;
       }
 
-
       const deletedFlight =
         FLIGHTS.find(
           f =>
             f.id ===
             id
         );
-
 
       FLIGHTS =
         FLIGHTS.filter(
@@ -2955,43 +2918,34 @@ if (
             id
         );
 
-
       renderBoard();
 
       closeFlightModal();
 
 
       if (SHEET_URL) {
-
         deleteFlightFromSheet(
           id
-        ).catch(
-          err => {
+        ).catch(err => {
+          console.error(
+            'Delete failed:',
+            err
+          );
 
-            console.error(
-              'Delete failed:',
-              err
-            );
-
-
-            if (
+          if (
+            deletedFlight
+          ) {
+            FLIGHTS.push(
               deletedFlight
-            ) {
-
-              FLIGHTS.push(
-                deletedFlight
-              );
-            }
-
-
-            renderBoard();
-
-
-            alert(
-              'Could not remove the flight from the sheet. The flight was restored.'
             );
           }
-        );
+
+          renderBoard();
+
+          alert(
+            'Could not remove the flight from the sheet. The flight was restored.'
+          );
+        });
       }
     }
   );
@@ -3007,11 +2961,7 @@ const addFlightBtn =
     'addFlightBtn'
   );
 
-
-if (
-  addFlightBtn
-) {
-
+if (addFlightBtn) {
   addFlightBtn.addEventListener(
     'click',
     () =>
@@ -3027,11 +2977,7 @@ const modalClose =
     'modalClose'
   );
 
-
-if (
-  modalClose
-) {
-
+if (modalClose) {
   modalClose.addEventListener(
     'click',
     closeFlightModal
@@ -3044,11 +2990,7 @@ const modalCancel =
     'modalCancel'
   );
 
-
-if (
-  modalCancel
-) {
-
+if (modalCancel) {
   modalCancel.addEventListener(
     'click',
     closeFlightModal
@@ -3065,15 +3007,10 @@ const searchBox =
     'searchBox'
   );
 
-
-if (
-  searchBox
-) {
-
+if (searchBox) {
   searchBox.addEventListener(
     'input',
     e => {
-
       searchTerm =
         e.target.value;
 
@@ -3088,15 +3025,10 @@ const statusFilter =
     'statusFilter'
   );
 
-
-if (
-  statusFilter
-) {
-
+if (statusFilter) {
   statusFilter.addEventListener(
     'change',
     e => {
-
       statusFilterVal =
         e.target.value;
 
@@ -3114,7 +3046,6 @@ function setSyncStatus(
   state,
   label
 ) {
-
   const el =
     document.getElementById(
       'syncStatus'
@@ -3124,7 +3055,6 @@ function setSyncStatus(
     return;
   }
 
-
   el.className =
     `sync-status sync-${state}`;
 
@@ -3133,113 +3063,89 @@ function setSyncStatus(
 }
 
 
+function syncTimeText() {
+  return new Date().toLocaleTimeString(
+    [],
+    {
+      hour: 'numeric',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: true
+    }
+  );
+}
+
+
 // ============================================================
-// LOAD FLIGHTS FROM SHEET
+// LOAD FLIGHTS
 // ============================================================
 
 async function loadFromSheet() {
-
-  if (
-    !SHEET_URL
-  ) {
+  if (!SHEET_URL) {
     return;
   }
-
 
   setSyncStatus(
     'offline',
     '● Connecting…'
   );
 
-
   try {
-
     const res =
       await fetch(
         SHEET_URL +
         '?action=list&_=' +
         Date.now(),
         {
-          method:
-            'GET',
-
-          redirect:
-            'follow',
-
-          cache:
-            'no-store'
+          method: 'GET',
+          redirect: 'follow',
+          cache: 'no-store'
         }
       );
 
-
-    if (
-      !res.ok
-    ) {
-
+    if (!res.ok) {
       throw new Error(
         `HTTP ${res.status}`
       );
     }
 
-
     const data =
       await res.json();
 
-
     if (
-      !Array.isArray(
-        data
-      )
+      !Array.isArray(data)
     ) {
-
       throw new Error(
         'Invalid response from Google Sheet'
       );
     }
-
 
     FLIGHTS =
       data.map(
         rowToFlight
       );
 
-
     setSyncStatus(
       'online',
-      `● Synced with sheet (${new Date().toLocaleTimeString(
-        [],
-        {
-          hour: 'numeric',
-          minute: '2-digit',
-          second: '2-digit',
-          hour12: true
-        }
-      )})`
+      `● Synced with sheet (${syncTimeText()})`
     );
-
 
     renderBoard();
 
-  } catch (
-    err
-  ) {
-
+  } catch (err) {
     console.error(
       'Sheet load failed:',
       err
     );
-
 
     setSyncStatus(
       'error',
       '● Sheet connection failed'
     );
 
-
     if (
       !FLIGHTS.length
     ) {
-
       FLIGHTS =
         CONFIG.SAMPLE_FLIGHTS.map(
           f => ({
@@ -3258,27 +3164,22 @@ async function loadFromSheet() {
         );
     }
 
-
     renderBoard();
   }
 }
 
 
 // ============================================================
-// CONVERT SHEET ROW TO FLIGHT
+// SHEET → FLIGHT
 // ============================================================
 
-function rowToFlight(
-  row
-) {
-
+function rowToFlight(row) {
   const departure =
     format12HourTime(
       row[
         'DEPARTURE TIME:'
       ] || ''
     );
-
 
   let boarding =
     format12HourTime(
@@ -3288,14 +3189,10 @@ function rowToFlight(
     );
 
 
-  // If Sheet has no boarding time,
-  // automatically create one 30 minutes
-  // before departure.
   if (
     !boarding &&
     departure
   ) {
-
     const dep =
       timeToMinutes(
         departure
@@ -3304,7 +3201,6 @@ function rowToFlight(
     if (
       dep !== null
     ) {
-
       boarding =
         minutesToClockString(
           dep - 30
@@ -3314,7 +3210,6 @@ function rowToFlight(
 
 
   return {
-
     id:
       row.id ||
       row[
@@ -3367,15 +3262,11 @@ function rowToFlight(
 
 
 // ============================================================
-// CONVERT FLIGHT TO SHEET ROW
+// FLIGHT → SHEET
 // ============================================================
 
-function flightToRow(
-  flight
-) {
-
+function flightToRow(flight) {
   return {
-
     id:
       flight.id,
 
@@ -3411,129 +3302,90 @@ function flightToRow(
 
 
 // ============================================================
-// SAVE FLIGHT TO GOOGLE SHEET
+// SAVE FLIGHT
 // ============================================================
 
 async function pushFlightToSheet(
   flight
 ) {
-
-  if (
-    !SHEET_URL
-  ) {
+  if (!SHEET_URL) {
     return;
   }
-
 
   setSyncStatus(
     'online',
     '● Saving…'
   );
-
 
   const row =
     flightToRow(
       flight
     );
 
-
   const url =
     SHEET_URL +
     '?action=upsert&row=' +
     encodeURIComponent(
-      JSON.stringify(
-        row
-      )
+      JSON.stringify(row)
     ) +
     '&_=' +
     Date.now();
 
-
   try {
-
     const res =
       await fetch(
         url,
         {
-          method:
-            'GET',
-
-          redirect:
-            'follow',
-
-          cache:
-            'no-store'
+          method: 'GET',
+          redirect: 'follow',
+          cache: 'no-store'
         }
       );
 
-
-    if (
-      !res.ok
-    ) {
-
+    if (!res.ok) {
       throw new Error(
         `HTTP ${res.status}`
       );
     }
 
-
     const data =
       await res.json();
-
 
     if (
       data &&
       data.error
     ) {
-
       throw new Error(
         data.error
       );
     }
 
-
     if (
       !data ||
       data.ok !== true
     ) {
-
       throw new Error(
         'Google Sheet did not confirm the save.'
       );
     }
 
-
     setSyncStatus(
       'online',
-      `● Synced with sheet (${new Date().toLocaleTimeString(
-        [],
-        {
-          hour: 'numeric',
-          minute: '2-digit',
-          second: '2-digit',
-          hour12: true
-        }
-      )})`
+      `● Synced with sheet (${syncTimeText()})`
     );
-
 
     return data;
 
-  } catch (
-    err
-  ) {
-
+  } catch (err) {
     console.error(
       'Google Sheet save failed:',
       err
     );
 
-
     setSyncStatus(
       'error',
       '● Sheet connection failed'
     );
-
 
     throw err;
   }
@@ -3541,121 +3393,83 @@ async function pushFlightToSheet(
 
 
 // ============================================================
-// DELETE FLIGHT FROM GOOGLE SHEET
+// DELETE FROM SHEET
 // ============================================================
 
 async function deleteFlightFromSheet(
   id
 ) {
-
-  if (
-    !SHEET_URL
-  ) {
+  if (!SHEET_URL) {
     return;
   }
-
 
   setSyncStatus(
     'online',
     '● Saving…'
   );
 
-
   const url =
     SHEET_URL +
     '?action=delete&id=' +
-    encodeURIComponent(
-      id
-    ) +
+    encodeURIComponent(id) +
     '&_=' +
     Date.now();
 
-
   try {
-
     const res =
       await fetch(
         url,
         {
-          method:
-            'GET',
-
-          redirect:
-            'follow',
-
-          cache:
-            'no-store'
+          method: 'GET',
+          redirect: 'follow',
+          cache: 'no-store'
         }
       );
 
-
-    if (
-      !res.ok
-    ) {
-
+    if (!res.ok) {
       throw new Error(
         `HTTP ${res.status}`
       );
     }
 
-
     const data =
       await res.json();
-
 
     if (
       data &&
       data.error
     ) {
-
       throw new Error(
         data.error
       );
     }
 
-
     if (
       !data ||
       data.ok !== true
     ) {
-
       throw new Error(
         'Google Sheet did not confirm the deletion.'
       );
     }
 
-
     setSyncStatus(
       'online',
-      `● Synced with sheet (${new Date().toLocaleTimeString(
-        [],
-        {
-          hour: 'numeric',
-          minute: '2-digit',
-          second: '2-digit',
-          hour12: true
-        }
-      )})`
+      `● Synced with sheet (${syncTimeText()})`
     );
-
 
     return data;
 
-  } catch (
-    err
-  ) {
-
+  } catch (err) {
     console.error(
       'Google Sheet delete failed:',
       err
     );
 
-
     setSyncStatus(
       'error',
       '● Sheet connection failed'
     );
-
 
     throw err;
   }
@@ -3663,7 +3477,7 @@ async function deleteFlightFromSheet(
 
 
 // ============================================================
-// SHEET CONNECTION
+// SHEET CONNECTION UI
 // ============================================================
 
 const syncBtn =
@@ -3697,10 +3511,7 @@ const sheetUrlInput =
   );
 
 
-if (
-  sheetUrlInput
-) {
-
+if (sheetUrlInput) {
   sheetUrlInput.value =
     SHEET_URL;
 
@@ -3709,27 +3520,16 @@ if (
 }
 
 
-if (
-  syncBtn
-) {
-
+if (syncBtn) {
   syncBtn.addEventListener(
     'click',
     () => {
-
-      if (
-        sheetUrlInput
-      ) {
-
+      if (sheetUrlInput) {
         sheetUrlInput.value =
           SHEET_URL;
       }
 
-
-      if (
-        sheetModal
-      ) {
-
+      if (sheetModal) {
         sheetModal.classList.remove(
           'hidden'
         );
@@ -3739,18 +3539,11 @@ if (
 }
 
 
-if (
-  sheetModalClose
-) {
-
+if (sheetModalClose) {
   sheetModalClose.addEventListener(
     'click',
     () => {
-
-      if (
-        sheetModal
-      ) {
-
+      if (sheetModal) {
         sheetModal.classList.add(
           'hidden'
         );
@@ -3760,18 +3553,11 @@ if (
 }
 
 
-if (
-  sheetModalCancel
-) {
-
+if (sheetModalCancel) {
   sheetModalCancel.addEventListener(
     'click',
     () => {
-
-      if (
-        sheetModal
-      ) {
-
+      if (sheetModal) {
         sheetModal.classList.add(
           'hidden'
         );
@@ -3781,32 +3567,20 @@ if (
 }
 
 
-if (
-  sheetModalSave
-) {
-
+if (sheetModalSave) {
   sheetModalSave.addEventListener(
     'click',
     () => {
-
-      if (
-        sheetUrlInput
-      ) {
-
+      if (sheetUrlInput) {
         sheetUrlInput.value =
           SHEET_URL;
       }
 
-
-      if (
-        sheetModal
-      ) {
-
+      if (sheetModal) {
         sheetModal.classList.add(
           'hidden'
         );
       }
-
 
       loadFromSheet();
     }
@@ -3819,16 +3593,12 @@ if (
 // ============================================================
 
 function setupBottomScrollButton() {
-
   let button =
     document.getElementById(
       'bottomScrollButton'
     );
 
-
-  // Create it if the HTML doesn't already have one.
   if (!button) {
-
     button =
       document.createElement(
         'button'
@@ -3848,8 +3618,6 @@ function setupBottomScrollButton() {
     );
   }
 
-
-  // Make it permanently visible.
   button.style.position =
     'fixed';
 
@@ -3874,8 +3642,6 @@ function setupBottomScrollButton() {
   button.style.cursor =
     'pointer';
 
-
-  // Don't add the click listener more than once.
   if (
     button.dataset.bottomReady ===
     'true'
@@ -3883,25 +3649,18 @@ function setupBottomScrollButton() {
     return;
   }
 
-
   button.dataset.bottomReady =
     'true';
-
 
   button.addEventListener(
     'click',
     () => {
-
       const scrollArea =
         document.querySelector(
           '.timeline-scroll'
         );
 
-
-      if (
-        scrollArea
-      ) {
-
+      if (scrollArea) {
         scrollArea.scrollTo({
           top:
             scrollArea.scrollHeight,
@@ -3909,9 +3668,7 @@ function setupBottomScrollButton() {
           behavior:
             'smooth'
         });
-
       } else {
-
         window.scrollTo({
           top:
             document.documentElement
@@ -3931,7 +3688,6 @@ function setupBottomScrollButton() {
 // ============================================================
 
 function tickClock() {
-
   const clock =
     document.getElementById(
       'clock'
@@ -3941,22 +3697,14 @@ function tickClock() {
     return;
   }
 
-
   clock.textContent =
     new Date().toLocaleTimeString(
       [],
       {
-        hour:
-          'numeric',
-
-        minute:
-          '2-digit',
-
-        second:
-          '2-digit',
-
-        hour12:
-          true
+        hour: 'numeric',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: true
       }
     );
 }
@@ -3973,7 +3721,6 @@ setInterval(
 // ============================================================
 
 function init() {
-
   populateAirlineOptions();
 
   populateGateDatalist();
@@ -3983,7 +3730,6 @@ function init() {
   setupBottomScrollButton();
 
   loadFromSheet();
-
 
   setInterval(
     renderBoard,
