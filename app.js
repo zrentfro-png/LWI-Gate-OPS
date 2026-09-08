@@ -2278,96 +2278,64 @@ async function deleteFlightFromSheet(id) {
   }
 }
   id
-) {
-  if (!SHEET_URL) {
-    return;
-  }
+async function deleteFlightFromSheet(id) {
+  if (!SHEET_URL) return;
 
-  setSyncStatus(
-    'online',
-    '● Saving…'
-  );
+  setSyncStatus('online', '● Saving…');
 
-  const payload = {
-    action: 'delete',
-    id: id
-  };
-
-  let res;
+  const url =
+    SHEET_URL +
+    '?action=delete&id=' +
+    encodeURIComponent(id) +
+    '&_=' +
+    Date.now();
 
   try {
+    const res = await fetch(url, {
+      method: 'GET',
+      redirect: 'follow',
+      cache: 'no-store'
+    });
 
-    res =
-      await fetch(
-        SHEET_URL,
-        {
-          method: 'POST',
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
 
-          headers: {
-            'Content-Type':
-              'text/plain;charset=utf-8'
-          },
+    const data = await res.json();
 
-          body:
-            JSON.stringify(payload)
-        }
+    if (data && data.error) {
+      throw new Error(data.error);
+    }
+
+    if (!data || data.ok !== true) {
+      throw new Error(
+        'Google Sheet did not confirm the deletion.'
       );
+    }
+
+    setSyncStatus(
+      'online',
+      `● Synced with sheet (${new Date().toLocaleTimeString()})`
+    );
+
+    return data;
 
   } catch (err) {
-
     console.error(
-      'Google Sheet delete request failed:',
+      'Google Sheet delete failed:',
       err
     );
 
-    throw new Error(
-      'Could not connect to the Google Sheet.'
+    setSyncStatus(
+      'error',
+      '● Sheet connection failed'
     );
+
+    throw err;
   }
-
-  if (!res.ok) {
-    throw new Error(
-      `HTTP ${res.status}`
-    );
-  }
-
-  let data = null;
-
-  try {
-    data =
-      await res.json();
-  } catch (err) {
-    throw new Error(
-      'Google Sheet returned an invalid response.'
-    );
-  }
-
-  if (
-    data &&
-    data.error
-  ) {
-    throw new Error(
-      data.error
-    );
-  }
-
-  if (
-    !data ||
-    data.ok !== true
-  ) {
-    throw new Error(
-      'Google Sheet did not confirm the deletion.'
-    );
-  }
-
-  setSyncStatus(
-    'online',
-    `● Synced with sheet (${new Date().toLocaleTimeString()})`
-  );
-
-  return data;
 }
 
+// ---------- Sheet connection ----------
 
 // ---------- Sheet connection ----------
 
