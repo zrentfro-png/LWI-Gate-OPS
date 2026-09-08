@@ -2046,11 +2046,16 @@ async function loadFromSheet() {
 
   try {
 
-    const res =
-      await fetch(
-        SHEET_URL +
-        '?action=list'
-      );
+    const res = await fetch(
+      SHEET_URL +
+      '?action=list&_=' +
+      Date.now(),
+      {
+        method: 'GET',
+        redirect: 'follow',
+        cache: 'no-store'
+      }
+    );
 
     if (!res.ok) {
       throw new Error(
@@ -2058,8 +2063,7 @@ async function loadFromSheet() {
       );
     }
 
-    const data =
-      await res.json();
+    const data = await res.json();
 
     if (!Array.isArray(data)) {
       throw new Error(
@@ -2067,10 +2071,7 @@ async function loadFromSheet() {
       );
     }
 
-    FLIGHTS =
-      data.map(
-        rowToFlight
-      );
+    FLIGHTS = data.map(rowToFlight);
 
     setSyncStatus(
       'online',
@@ -2091,7 +2092,6 @@ async function loadFromSheet() {
       '● Sheet connection failed'
     );
 
-    // Still render the board so it isn't blank.
     if (!FLIGHTS.length) {
       FLIGHTS =
         CONFIG.SAMPLE_FLIGHTS.map(
@@ -2104,7 +2104,6 @@ async function loadFromSheet() {
     renderBoard();
   }
 }
-
 
 // ---------- Convert sheet row to flight ----------
 
