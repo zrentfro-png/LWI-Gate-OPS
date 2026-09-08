@@ -467,10 +467,8 @@ function renderFlightCard(
       : flight.status === 'DELAYED'
         ? 'status-delayed'
         : (
-            flight.status ===
-              'CANCELLED' ||
-            flight.status ===
-              'DIVERTED'
+            flight.status === 'CANCELLED' ||
+            flight.status === 'DIVERTED'
           )
             ? 'status-cancelled'
             : '';
@@ -1183,6 +1181,7 @@ function attachResizeHandlers(
       renderBoard();
 
       if (SHEET_URL) {
+
         pushFlightToSheet(
           flight
         ).catch(err => {
@@ -1212,23 +1211,27 @@ function attachResizeHandlers(
   }
 
 
-  leftHandle.addEventListener(
-    'mousedown',
-    e =>
-      startResize(
-        e,
-        true
-      )
-  );
+  if (leftHandle) {
+    leftHandle.addEventListener(
+      'mousedown',
+      e =>
+        startResize(
+          e,
+          true
+        )
+    );
+  }
 
-  rightHandle.addEventListener(
-    'mousedown',
-    e =>
-      startResize(
-        e,
-        false
-      )
-  );
+  if (rightHandle) {
+    rightHandle.addEventListener(
+      'mousedown',
+      e =>
+        startResize(
+          e,
+          false
+        )
+    );
+  }
 }
 
 
@@ -1317,8 +1320,6 @@ function handleGateDrop(
   }
 
 
-  // Check airline ownership.
-
   if (
     gateOwner &&
     !airlinesMatch(
@@ -1338,9 +1339,6 @@ function handleGateDrop(
     }
   }
 
-
-  // IMPORTANT:
-  // Take the original values from the drag snapshot.
 
   const originalBoarding =
     ACTIVE_DRAG &&
@@ -1363,8 +1361,6 @@ function handleGateDrop(
   flight.gate =
     newGate;
 
-  // Explicitly restore the original times.
-
   flight.boarding =
     originalBoarding;
 
@@ -1376,8 +1372,6 @@ function handleGateDrop(
   renderBoard();
 
 
-  // Save the gate change.
-
   if (SHEET_URL) {
 
     pushFlightToSheet(
@@ -1388,8 +1382,6 @@ function handleGateDrop(
         'Gate sync failed:',
         err
       );
-
-      // Revert ONLY the gate.
 
       flight.gate =
         oldGate;
@@ -1701,21 +1693,28 @@ function openFlightModal(
 }
 
 function closeFlightModal() {
-  document.getElementById(
-    'flightModal'
-  ).classList.add(
-    'hidden'
-  );
+  const modal =
+    document.getElementById(
+      'flightModal'
+    );
+
+  if (modal) {
+    modal.classList.add(
+      'hidden'
+    );
+  }
 }
 
 
 // ---------- Add / Edit flight ----------
 
-document
-  .getElementById(
+const flightForm =
+  document.getElementById(
     'flightForm'
-  )
-  .addEventListener(
+  );
+
+if (flightForm) {
+  flightForm.addEventListener(
     'submit',
     e => {
 
@@ -1869,15 +1868,18 @@ document
       }
     }
   );
+}
 
 
 // ---------- Delete flight ----------
 
-document
-  .getElementById(
+const deleteFlightBtn =
+  document.getElementById(
     'deleteFlightBtn'
-  )
-  .addEventListener(
+  );
+
+if (deleteFlightBtn) {
+  deleteFlightBtn.addEventListener(
     'click',
     () => {
 
@@ -1940,46 +1942,58 @@ document
       }
     }
   );
+}
 
 
 // ---------- Modal controls ----------
 
-document
-  .getElementById(
+const addFlightBtn =
+  document.getElementById(
     'addFlightBtn'
-  )
-  .addEventListener(
+  );
+
+if (addFlightBtn) {
+  addFlightBtn.addEventListener(
     'click',
     () =>
       openFlightModal(null)
   );
+}
 
-document
-  .getElementById(
+const modalClose =
+  document.getElementById(
     'modalClose'
-  )
-  .addEventListener(
-    'click',
-    closeFlightModal
   );
 
-document
-  .getElementById(
-    'modalCancel'
-  )
-  .addEventListener(
+if (modalClose) {
+  modalClose.addEventListener(
     'click',
     closeFlightModal
   );
+}
+
+const modalCancel =
+  document.getElementById(
+    'modalCancel'
+  );
+
+if (modalCancel) {
+  modalCancel.addEventListener(
+    'click',
+    closeFlightModal
+  );
+}
 
 
 // ---------- Search / filter ----------
 
-document
-  .getElementById(
+const searchBox =
+  document.getElementById(
     'searchBox'
-  )
-  .addEventListener(
+  );
+
+if (searchBox) {
+  searchBox.addEventListener(
     'input',
     e => {
 
@@ -1989,12 +2003,15 @@ document
       renderBoard();
     }
   );
+}
 
-document
-  .getElementById(
+const statusFilter =
+  document.getElementById(
     'statusFilter'
-  )
-  .addEventListener(
+  );
+
+if (statusFilter) {
+  statusFilter.addEventListener(
     'change',
     e => {
 
@@ -2004,6 +2021,7 @@ document
       renderBoard();
     }
   );
+}
 
 
 // ============================================================
@@ -2046,16 +2064,17 @@ async function loadFromSheet() {
 
   try {
 
-    const res = await fetch(
-      SHEET_URL +
-      '?action=list&_=' +
-      Date.now(),
-      {
-        method: 'GET',
-        redirect: 'follow',
-        cache: 'no-store'
-      }
-    );
+    const res =
+      await fetch(
+        SHEET_URL +
+        '?action=list&_=' +
+        Date.now(),
+        {
+          method: 'GET',
+          redirect: 'follow',
+          cache: 'no-store'
+        }
+      );
 
     if (!res.ok) {
       throw new Error(
@@ -2063,7 +2082,8 @@ async function loadFromSheet() {
       );
     }
 
-    const data = await res.json();
+    const data =
+      await res.json();
 
     if (!Array.isArray(data)) {
       throw new Error(
@@ -2071,7 +2091,10 @@ async function loadFromSheet() {
       );
     }
 
-    FLIGHTS = data.map(rowToFlight);
+    FLIGHTS =
+      data.map(
+        rowToFlight
+      );
 
     setSyncStatus(
       'online',
@@ -2104,6 +2127,7 @@ async function loadFromSheet() {
     renderBoard();
   }
 }
+
 
 // ---------- Convert sheet row to flight ----------
 
@@ -2180,89 +2204,69 @@ function flightToRow(flight) {
 
 // ============================================================
 // SAVE FLIGHT TO GOOGLE SHEET
-//
-// IMPORTANT:
-// Uses POST instead of GET for upsert/delete.
-// Your Code.gs already has doPost() handlers.
 // ============================================================
 
-async function pushFlightToSheet(flight) {
+async function pushFlightToSheet(
+  flight
+) {
   if (!SHEET_URL) {
     return;
   }
 
-  setSyncStatus('online', '● Saving…');
+  setSyncStatus(
+    'online',
+    '● Saving…'
+  );
 
-  const row = flightToRow(flight);
+  const row =
+    flightToRow(flight);
 
   const url =
     SHEET_URL +
     '?action=upsert&row=' +
-    encodeURIComponent(JSON.stringify(row));
-
-  try {
-    const res = await fetch(url);
-
-    if (!res.ok) {
-      throw new Error('HTTP ' + res.status);
-    }
-
-    const data = await res.json();
-
-    if (data.error) {
-      throw new Error(data.error);
-    }
-
-    if (data.ok !== true) {
-      throw new Error('Google Sheet did not confirm the save.');
-    }
-
-    setSyncStatus(
-      'online',
-      '● Synced with sheet (' +
-      new Date().toLocaleTimeString() +
-      ')'
-    );
-
-    return data;
-
-  } catch (err) {
-    console.error('Google Sheet save failed:', err);
-    setSyncStatus('error', '● Sheet connection failed');
-    throw err;
-  }
-}
-
-// ============================================================
-// DELETE FLIGHT FROM GOOGLE SHEET
-// ============================================================
-
-async function deleteFlightFromSheet(id) {
-  if (!SHEET_URL) return;
-
-  setSyncStatus('online', '● Saving…');
-
-  const url =
-    SHEET_URL +
-    '?action=delete&id=' +
-    encodeURIComponent(id) +
+    encodeURIComponent(
+      JSON.stringify(row)
+    ) +
     '&_=' +
     Date.now();
 
   try {
-    const res = await fetch(url, {
-      method: 'GET',
-      redirect: 'follow',
-      cache: 'no-store'
-    });
 
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const res =
+      await fetch(
+        url,
+        {
+          method: 'GET',
+          redirect: 'follow',
+          cache: 'no-store'
+        }
+      );
 
-    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(
+        `HTTP ${res.status}`
+      );
+    }
 
-    if (data && data.error) throw new Error(data.error);
-    if (!data || data.ok !== true) {
-      throw new Error('Google Sheet did not confirm the deletion.');
+    const data =
+      await res.json();
+
+    if (
+      data &&
+      data.error
+    ) {
+      throw new Error(
+        data.error
+      );
+    }
+
+    if (
+      !data ||
+      data.ok !== true
+    ) {
+      throw new Error(
+        'Google Sheet did not confirm the save.'
+      );
     }
 
     setSyncStatus(
@@ -2271,17 +2275,41 @@ async function deleteFlightFromSheet(id) {
     );
 
     return data;
+
   } catch (err) {
-    console.error('Google Sheet delete failed:', err);
-    setSyncStatus('error', '● Sheet connection failed');
+
+    console.error(
+      'Google Sheet save failed:',
+      err
+    );
+
+    setSyncStatus(
+      'error',
+      '● Sheet connection failed'
+    );
+
     throw err;
   }
 }
-  id
-async function deleteFlightFromSheet(id) {
-  if (!SHEET_URL) return;
 
-  setSyncStatus('online', '● Saving…');
+
+// ============================================================
+// DELETE FLIGHT FROM GOOGLE SHEET
+//
+// THIS IS THE ONLY deleteFlightFromSheet FUNCTION.
+// ============================================================
+
+async function deleteFlightFromSheet(
+  id
+) {
+  if (!SHEET_URL) {
+    return;
+  }
+
+  setSyncStatus(
+    'online',
+    '● Saving…'
+  );
 
   const url =
     SHEET_URL +
@@ -2291,23 +2319,39 @@ async function deleteFlightFromSheet(id) {
     Date.now();
 
   try {
-    const res = await fetch(url, {
-      method: 'GET',
-      redirect: 'follow',
-      cache: 'no-store'
-    });
+
+    const res =
+      await fetch(
+        url,
+        {
+          method: 'GET',
+          redirect: 'follow',
+          cache: 'no-store'
+        }
+      );
 
     if (!res.ok) {
-      throw new Error(`HTTP ${res.status}`);
+      throw new Error(
+        `HTTP ${res.status}`
+      );
     }
 
-    const data = await res.json();
+    const data =
+      await res.json();
 
-    if (data && data.error) {
-      throw new Error(data.error);
+    if (
+      data &&
+      data.error
+    ) {
+      throw new Error(
+        data.error
+      );
     }
 
-    if (!data || data.ok !== true) {
+    if (
+      !data ||
+      data.ok !== true
+    ) {
       throw new Error(
         'Google Sheet did not confirm the deletion.'
       );
@@ -2321,6 +2365,7 @@ async function deleteFlightFromSheet(id) {
     return data;
 
   } catch (err) {
+
     console.error(
       'Google Sheet delete failed:',
       err
@@ -2335,7 +2380,6 @@ async function deleteFlightFromSheet(id) {
   }
 }
 
-// ---------- Sheet connection ----------
 
 // ---------- Sheet connection ----------
 
@@ -2374,6 +2418,7 @@ const sheetUrlInput =
 
 
 if (sheetUrlInput) {
+
   sheetUrlInput.value =
     SHEET_URL;
 
@@ -2383,6 +2428,7 @@ if (sheetUrlInput) {
 
 
 if (syncBtn) {
+
   syncBtn.addEventListener(
     'click',
     () => {
@@ -2403,9 +2449,11 @@ if (syncBtn) {
 
 
 if (sheetModalClose) {
+
   sheetModalClose.addEventListener(
     'click',
     () => {
+
       if (sheetModal) {
         sheetModal.classList.add(
           'hidden'
@@ -2417,9 +2465,11 @@ if (sheetModalClose) {
 
 
 if (sheetModalCancel) {
+
   sheetModalCancel.addEventListener(
     'click',
     () => {
+
       if (sheetModal) {
         sheetModal.classList.add(
           'hidden'
@@ -2431,11 +2481,11 @@ if (sheetModalCancel) {
 
 
 if (sheetModalSave) {
+
   sheetModalSave.addEventListener(
     'click',
     () => {
 
-      // The URL cannot be changed.
       if (sheetUrlInput) {
         sheetUrlInput.value =
           SHEET_URL;
@@ -2456,6 +2506,7 @@ if (sheetModalSave) {
 // ---------- Clock ----------
 
 function tickClock() {
+
   const clock =
     document.getElementById(
       'clock'
@@ -2490,7 +2541,6 @@ function init() {
 
   tickClock();
 
-  // Always try the Google Sheet first.
   loadFromSheet();
 
   setInterval(
