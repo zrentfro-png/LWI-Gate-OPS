@@ -2187,139 +2187,51 @@ function flightToRow(flight) {
 // ============================================================
 
 async function pushFlightToSheet(flight) {
-  if (!SHEET_URL) return;
+  if (!SHEET_URL) {
+    return;
+  }
 
   setSyncStatus('online', '● Saving…');
 
   const row = flightToRow(flight);
+
   const url =
     SHEET_URL +
     '?action=upsert&row=' +
-    encodeURIComponent(JSON.stringify(row)) +
-    '&_=' +
-    Date.now();
+    encodeURIComponent(JSON.stringify(row));
 
   try {
-    const res = await fetch(url, {
-      method: 'GET',
-      redirect: 'follow',
-      cache: 'no-store'
-    });
+    const res = await fetch(url);
 
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    if (!res.ok) {
+      throw new Error('HTTP ' + res.status);
+    }
 
     const data = await res.json();
 
-    if (data && data.error) throw new Error(data.error);
-    if (!data || data.ok !== true) {
+    if (data.error) {
+      throw new Error(data.error);
+    }
+
+    if (data.ok !== true) {
       throw new Error('Google Sheet did not confirm the save.');
     }
 
     setSyncStatus(
       'online',
-      `● Synced with sheet (${new Date().toLocaleTimeString()})`
+      '● Synced with sheet (' +
+      new Date().toLocaleTimeString() +
+      ')'
     );
 
     return data;
+
   } catch (err) {
     console.error('Google Sheet save failed:', err);
     setSyncStatus('error', '● Sheet connection failed');
     throw err;
   }
 }
-  flight
-) {
-  if (!SHEET_URL) {
-    return;
-  }
-
-  setSyncStatus(
-    'online',
-    '● Saving…'
-  );
-
-  const payload = {
-    action: 'upsert',
-    row: flightToRow(flight)
-  };
-
-  let res;
-
-  try {
-
-    res =
-      await fetch(
-        SHEET_URL,
-        {
-          method: 'POST',
-
-          // text/plain avoids the browser sending
-          // an OPTIONS preflight request.
-          headers: {
-            'Content-Type':
-              'text/plain;charset=utf-8'
-          },
-
-          body:
-            JSON.stringify(payload)
-        }
-      );
-
-  } catch (err) {
-
-    console.error(
-      'Google Sheet POST request failed:',
-      err
-    );
-
-    throw new Error(
-      'Could not connect to the Google Sheet.'
-    );
-  }
-
-  if (!res.ok) {
-    throw new Error(
-      `HTTP ${res.status}`
-    );
-  }
-
-  let data = null;
-
-  try {
-    data =
-      await res.json();
-  } catch (err) {
-    throw new Error(
-      'Google Sheet returned an invalid response.'
-    );
-  }
-
-  if (
-    data &&
-    data.error
-  ) {
-    throw new Error(
-      data.error
-    );
-  }
-
-  if (
-    !data ||
-    data.ok !== true
-  ) {
-    throw new Error(
-      'Google Sheet did not confirm the save.'
-    );
-  }
-
-  setSyncStatus(
-    'online',
-    `● Synced with sheet (${new Date().toLocaleTimeString()})`
-  );
-
-  return data;
-}
-
 
 // ============================================================
 // DELETE FLIGHT FROM GOOGLE SHEET
