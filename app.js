@@ -1,1972 +1,2183 @@
 /* ============================================================
-   GATE OPS BOARD — APP LOGIC
-   ============================================================ */
-
-// ---------- Permanent Google Sheet connection ----------
-
-// This is permanently built into the app.
-// There is no Connect Sheet button or editable URL.
-const SHEET_URL =
-  'https://script.google.com/macros/s/AKfycby9XfQI4dPTTHNPAoxeVWm0RLUMSeg6dl-H6iOOhPGAkjHODmseogl9h5RAxcRfYst6aA/exec';
+GATE OPS BOARD — APP LOGIC
+============================================================ */
 
 // ---------- State ----------
 
 let FLIGHTS = [];
+let SHEET_URL = localStorage.getItem('gateops_sheet_url') || '';
 let searchTerm = '';
 let statusFilterVal = 'all';
 
 // ---------- Gate map expansion ----------
 
-// Turns CONFIG.GATE_MAP ranges into a flat list:
-// { id: "A3", concourse: "A", num: 3, airline: "UNITED" }
-
 function buildGateList() {
-  const gates = [];
-
-  CONFIG.GATE_MAP.forEach(range => {
-    for (let n = range.start; n <= range.end; n++) {
-      gates.push({
-        id: `${range.concourse}${n}`,
-        concourse: range.concourse,
-        num: n,
-        airline: range.airline
-      });
-    }
-  });
-
-  return gates;
+const gates = [];
+CONFIG.GATE_MAP.forEach(range => {
+for (let n = range.start; n <= range.end; n++) {
+gates.push({
+id: `${range.concourse}${n}`,
+concourse: range.concourse,
+num: n,
+airline: range.airline
+});
+}
+});
+return gates;
 }
 
 const GATE_LIST = buildGateList();
-const GATE_BY_ID = Object.fromEntries(
-  GATE_LIST.map(g => [g.id, g])
-);
-const CONCOURSES = [
-  ...new Set(GATE_LIST.map(g => g.concourse))
-].sort();
+const GATE_BY_ID = Object.fromEntries(GATE_LIST.map(g => [g.id, g]));
+const CONCOURSES = [...new Set(GATE_LIST.map(g => g.concourse))].sort();
 
 // ---------- Time helpers ----------
 
 function timeToMinutes(raw) {
-  if (!raw) return null;
+if (!raw) return null;
 
-  const str = raw.toString().trim();
+const str = raw.toString().trim();
 
-  const match = str.match(
-    /^(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)?$/
-  );
+const match = str.match(/^(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)?$/);
+if (!match) return null;
 
-  if (!match) return null;
+let h = parseInt(match[1], 10);
+const m = parseInt(match[2], 10);
 
-  let h = parseInt(match[1], 10);
-  const m = parseInt(match[2], 10);
+const ampm = match[3] ? match[3].toUpperCase() : null;
 
-  const ampm = match[3]
-    ? match[3].toUpperCase()
-    : null;
+if (ampm === 'PM' && h !== 12) h += 12;
+if (ampm === 'AM' && h === 12) h = 0;
 
-  if (ampm === 'PM' && h !== 12) h += 12;
-  if (ampm === 'AM' && h === 12) h = 0;
-
-  return h * 60 + m;
+return h * 60 + m;
 }
 
 function minutesToTime(mins) {
-  mins = ((mins % 1440) + 1440) % 1440;
+mins = ((mins % 1440) + 1440) % 1440;
 
-  const h = Math.floor(mins / 60)
-    .toString()
-    .padStart(2, '0');
+const h = Math.floor(mins / 60).toString().padStart(2, '0');
+const m = (mins % 60).toString().padStart(2, '0');
 
-  const m = (mins % 60)
-    .toString()
-    .padStart(2, '0');
-
-  return `${h}:${m}`;
+return `${h}:${m}`;
 }
-
-// Converts a flight time to its position on the timeline,
-// accounting for overnight schedules.
 
 function toTimelineMinutes(raw) {
-  const mins = timeToMinutes(raw);
+const mins = timeToMinutes(raw);
+if (mins === null) return null;
 
-  if (mins === null) return null;
-
-  return mins < TIMELINE_START_MIN
-    ? mins + 1440
-    : mins;
-}
-
-// Occupancy window for a flight.
-
-function occupancyWindow(flight) {
-  const dep = toTimelineMinutes(flight.departure);
-
-  if (dep === null) return null;
-
-  const turnaroundStart =
-    dep - CONFIG.TURNAROUND_MINUTES;
-
-  const boarding =
-    toTimelineMinutes(flight.boarding);
-
-  const start =
-    boarding !== null
-      ? Math.min(boarding, turnaroundStart)
-      : turnaroundStart;
-
-  const end =
-    dep +
-    (flight.status === 'DELAYED' ? 20 : 0);
-
-  return {
-    start,
-    end
-  };
+return mins < TIMELINE_START_MIN ? mins + 1440 : mins;
 }
 
 function minutesToClockString(mins) {
-  const m =
-    ((Math.round(mins) % 1440) + 1440) % 1440;
+const m = ((Math.round(mins) % 1440) + 1440) % 1440;
 
-  const h = Math.floor(m / 60);
+const h = Math.floor(m / 60);
+const mm = (m % 60).toString().padStart(2, '0');
 
-  const mm = (m % 60)
-    .toString()
-    .padStart(2, '0');
+const ampm = h < 12 ? 'AM' : 'PM';
 
-  const ampm = h < 12 ? 'AM' : 'PM';
+let h12 = h % 12;
+if (h12 === 0) h12 = 12;
 
-  let h12 = h % 12;
+return `${h12}:${mm} ${ampm}`;
+}
 
-  if (h12 === 0) h12 = 12;
+// ---------- Occupancy ----------
 
-  return `${h12}:${mm} ${ampm}`;
+function occupancyWindow(flight) {
+const dep = toTimelineMinutes(flight.departure);
+if (dep === null) return null;
+
+const turnaroundStart =
+dep - CONFIG.TURNAROUND_MINUTES;
+
+const boarding =
+toTimelineMinutes(flight.boarding);
+
+const start =
+boarding !== null
+? Math.min(boarding, turnaroundStart)
+: turnaroundStart;
+
+const end =
+dep + (flight.status === 'DELAYED' ? 20 : 0);
+
+return { start, end };
 }
 
 function windowsOverlap(a, b) {
-  return a.start < b.end && b.start < a.end;
+return a.start < b.end && b.start < a.end;
 }
 
 // ---------- Conflict detection ----------
 
 function computeConflicts() {
-  const conflicts = new Map();
-  const byGate = {};
+const conflicts = new Map();
+const byGate = {};
 
-  FLIGHTS.forEach(f => {
+FLIGHTS.forEach(f => {
+if (
+f.status === 'CANCELLED' ||
+f.status === 'DIVERTED'
+) {
+return;
+}
+
+```
+if (!byGate[f.gate]) {
+  byGate[f.gate] = [];
+}
+
+byGate[f.gate].push(f);
+```
+
+});
+
+Object.values(byGate).forEach(list => {
+list.sort(
+(a, b) =>
+toTimelineMinutes(a.departure) -
+toTimelineMinutes(b.departure)
+);
+
+```
+for (let i = 0; i < list.length; i++) {
+  for (let j = i + 1; j < list.length; j++) {
+    const wa = occupancyWindow(list[i]);
+    const wb = occupancyWindow(list[j]);
+
     if (
-      f.status === 'CANCELLED' ||
-      f.status === 'DIVERTED'
+      wa &&
+      wb &&
+      windowsOverlap(wa, wb)
     ) {
-      return;
+      conflicts.set(
+        list[j].id,
+        list[i].id
+      );
     }
+  }
+}
+```
 
-    if (!byGate[f.gate]) {
-      byGate[f.gate] = [];
-    }
+});
 
-    byGate[f.gate].push(f);
-  });
+return conflicts;
+}
 
-  Object.values(byGate).forEach(list => {
-    list.sort(
-      (a, b) =>
-        toTimelineMinutes(a.departure) -
-        toTimelineMinutes(b.departure)
-    );
+// ---------- Airline helpers ----------
 
-    for (let i = 0; i < list.length; i++) {
-      for (let j = i + 1; j < list.length; j++) {
-        const wa = occupancyWindow(list[i]);
-        const wb = occupancyWindow(list[j]);
+function normalizeAirline(str) {
+return (str || '')
+.toString()
+.trim()
+.toUpperCase();
+}
 
-        if (
-          wa &&
-          wb &&
-          windowsOverlap(wa, wb)
-        ) {
-          conflicts.set(
-            list[j].id,
-            list[i].id
-          );
-        }
-      }
-    }
-  });
+function airlinesMatch(a, b) {
+const na = normalizeAirline(a);
+const nb = normalizeAirline(b);
 
-  return conflicts;
+if (!na || !nb) return false;
+
+return (
+na === nb ||
+na.includes(nb) ||
+nb.includes(na)
+);
+}
+
+function isWrongAirlineGate(flight) {
+const gate = GATE_BY_ID[flight.gate];
+
+if (!gate) return false;
+
+return !airlinesMatch(
+gate.airline,
+flight.airline
+);
 }
 
 // ---------- Gate suggestions ----------
 
-function suggestGatesFor(
-  flight,
-  excludeGateId
-) {
-  const window = occupancyWindow(flight);
+function suggestGatesFor(flight, excludeGateId) {
+const window = occupancyWindow(flight);
 
-  if (!window) return [];
+if (!window) return [];
 
-  const candidates = GATE_LIST.filter(
-    g =>
-      airlinesMatch(
-        g.airline,
-        flight.airline
-      ) &&
-      g.id !== excludeGateId
-  );
+const candidates = GATE_LIST.filter(g =>
+airlinesMatch(
+g.airline,
+flight.airline
+) &&
+g.id !== excludeGateId
+);
 
-  const scored = candidates
-    .map(g => {
-      const conflictsAtGate =
-        FLIGHTS.filter(
-          f =>
-            f.id !== flight.id &&
-            f.gate === g.id &&
-            f.status !== 'CANCELLED' &&
-            f.status !== 'DIVERTED'
-        )
-        .some(f => {
-          const w2 =
-            occupancyWindow(f);
+const scored = candidates
+.map(g => {
 
-          return (
-            w2 &&
-            windowsOverlap(
-              window,
-              w2
-            )
-          );
-        });
+```
+  const conflictsAtGate = FLIGHTS
+    .filter(f =>
+      f.id !== flight.id &&
+      f.gate === g.id &&
+      f.status !== 'CANCELLED' &&
+      f.status !== 'DIVERTED'
+    )
+    .some(f => {
+      const w2 = occupancyWindow(f);
 
-      if (conflictsAtGate) return null;
+      return (
+        w2 &&
+        windowsOverlap(window, w2)
+      );
+    });
 
-      const currentGate =
-        GATE_BY_ID[excludeGateId];
+  if (conflictsAtGate) return null;
 
-      const sameConcourse =
-        currentGate &&
-        g.concourse ===
-          currentGate.concourse;
+  const currentGate =
+    GATE_BY_ID[excludeGateId];
 
-      const distance =
-        currentGate
-          ? Math.abs(
-              g.num -
-              currentGate.num
-            )
-          : 0;
+  const sameConcourse =
+    currentGate &&
+    g.concourse === currentGate.concourse;
 
-      const score =
-        (sameConcourse ? 0 : 1000) +
-        distance;
+  const distance =
+    currentGate
+      ? Math.abs(g.num - currentGate.num)
+      : 0;
 
-      return {
-        gate: g.id,
-        score
-      };
-    })
-    .filter(Boolean);
+  const score =
+    (sameConcourse ? 0 : 1000) +
+    distance;
 
-  scored.sort(
-    (a, b) =>
-      a.score - b.score
-  );
+  return {
+    gate: g.id,
+    score
+  };
+})
+.filter(Boolean);
+```
 
-  return scored
-    .slice(0, 3)
-    .map(s => s.gate);
-}
+scored.sort(
+(a, b) => a.score - b.score
+);
 
-// ---------- Airline / gate ownership ----------
-
-function normalizeAirline(str) {
-  return (str || '')
-    .toString()
-    .trim()
-    .toUpperCase();
-}
-
-function airlinesMatch(a, b) {
-  const na = normalizeAirline(a);
-  const nb = normalizeAirline(b);
-
-  if (!na || !nb) return false;
-
-  return (
-    na === nb ||
-    na.includes(nb) ||
-    nb.includes(na)
-  );
-}
-
-function isWrongAirlineGate(flight) {
-  const gate =
-    GATE_BY_ID[flight.gate];
-
-  if (!gate) return false;
-
-  return !airlinesMatch(
-    gate.airline,
-    flight.airline
-  );
+return scored
+.slice(0, 3)
+.map(s => s.gate);
 }
 
 // ---------- Rendering ----------
 
 function flightMatchesFilters(f) {
-  if (
-    statusFilterVal !== 'all' &&
-    f.status !== statusFilterVal
-  ) {
-    return false;
-  }
+if (
+statusFilterVal !== 'all' &&
+f.status !== statusFilterVal
+) {
+return false;
+}
 
-  if (!searchTerm) return true;
+if (!searchTerm) return true;
 
-  const term =
-    searchTerm.toLowerCase();
+const term =
+searchTerm.toLowerCase();
 
-  return (
-    f.flightNumber
-      .toLowerCase()
-      .includes(term) ||
+return (
+f.flightNumber
+.toLowerCase()
+.includes(term) ||
 
-    f.gate
-      .toLowerCase()
-      .includes(term) ||
+```
+f.gate
+  .toLowerCase()
+  .includes(term) ||
 
-    f.to
-      .toLowerCase()
-      .includes(term) ||
+f.to
+  .toLowerCase()
+  .includes(term) ||
 
-    f.airline
-      .toLowerCase()
-      .includes(term)
-  );
+f.airline
+  .toLowerCase()
+  .includes(term)
+```
+
+);
 }
 
 function statusPillClass(status) {
-  switch (status) {
-    case 'ON TIME':
-      return 'pill-on-time';
+switch (status) {
+case 'ON TIME':
+return 'pill-on-time';
 
-    case 'DELAYED':
-      return 'pill-delayed';
+```
+case 'DELAYED':
+  return 'pill-delayed';
 
-    case 'BOARDING':
-      return 'pill-boarding';
+case 'BOARDING':
+  return 'pill-boarding';
 
-    case 'CANCELLED':
-      return 'pill-cancelled';
+case 'CANCELLED':
+  return 'pill-cancelled';
 
-    case 'DIVERTED':
-      return 'pill-diverted';
+case 'DIVERTED':
+  return 'pill-diverted';
 
-    default:
-      return '';
-  }
+default:
+  return '';
+```
+
 }
-
-function renderFlightCard(
-  flight,
-  isConflict
-) {
-  const card =
-    document.createElement('div');
-
-  card.className =
-    'flight-card';
-
-  card.dataset.flightId =
-    flight.id;
-
-  card.draggable = true;
-
-  const statusClass =
-    isConflict
-      ? 'status-conflict'
-      : flight.status === 'DELAYED'
-        ? 'status-delayed'
-        : (
-            flight.status === 'CANCELLED' ||
-            flight.status === 'DIVERTED'
-          )
-            ? 'status-cancelled'
-            : '';
-
-  if (statusClass) {
-    card.classList.add(
-      statusClass
-    );
-  }
-
-  const stripeColor =
-    CONFIG.AIRLINE_COLORS[
-      flight.airline
-    ] || '#3E7BFA';
-
-  if (
-    !isConflict &&
-    flight.status !== 'DELAYED' &&
-    flight.status !== 'CANCELLED' &&
-    flight.status !== 'DIVERTED'
-  ) {
-    card.style.borderLeftColor =
-      stripeColor;
-  }
-
-  const pillClass =
-    isConflict
-      ? 'pill-conflict'
-      : statusPillClass(
-          flight.status
-        );
-
-  const pillLabel =
-    isConflict
-      ? 'CONFLICT'
-      : flight.status;
-
-  card.innerHTML = `
-    <div class="fc-top">
-      <span class="fc-flightnum">
-        ${escapeHtml(flight.flightNumber)}
-      </span>
-
-      <span class="fc-to">
-        → ${escapeHtml(flight.to)}
-      </span>
-    </div>
-
-    <div class="fc-times">
-      <span>
-        Board ${escapeHtml(flight.boarding)}
-      </span>
-
-      <span>
-        Dep ${escapeHtml(flight.departure)}
-      </span>
-    </div>
-
-    <div class="fc-status-line">
-      <span class="fc-status-pill ${pillClass}">
-        ${pillLabel}
-      </span>
-    </div>
-
-    ${
-      flight.comments
-        ? `
-          <div class="fc-comment">
-            ${escapeHtml(
-              flight.comments
-            )}
-          </div>
-        `
-        : ''
-    }
-
-    ${
-      isConflict
-        ? `
-          <div class="fc-conflict-note">
-            Overlaps another aircraft at this gate
-          </div>
-        `
-        : ''
-    }
-
-    ${
-      !isConflict &&
-      isWrongAirlineGate(flight)
-        ? `
-          <div class="fc-wrong-airline-note">
-            On a ${
-              GATE_BY_ID[
-                flight.gate
-              ].airline
-            } gate
-          </div>
-        `
-        : ''
-    }
-
-    <div
-      class="resize-handle resize-left"
-      title="Drag to change boarding time"
-    ></div>
-
-    <div
-      class="resize-handle resize-right"
-      title="Drag to change departure time"
-    ></div>
-  `;
-
-  card.addEventListener(
-    'click',
-    () => {
-      if (
-        card.classList.contains(
-          'was-dragged'
-        )
-      ) {
-        return;
-      }
-
-      openFlightModal(
-        flight.id
-      );
-    }
-  );
-
-  card.addEventListener(
-    'dragstart',
-    e => {
-      e.dataTransfer.setData(
-        'text/plain',
-        flight.id
-      );
-
-      e.dataTransfer.effectAllowed =
-        'move';
-
-      card.classList.add(
-        'dragging'
-      );
-    }
-  );
-
-  card.addEventListener(
-    'dragend',
-    () => {
-      card.classList.remove(
-        'dragging'
-      );
-    }
-  );
-
-  return card;
 }
 
 function escapeHtml(str) {
-  const div =
-    document.createElement('div');
+const div =
+document.createElement('div');
 
-  div.textContent =
-    str || '';
+div.textContent = str;
 
-  return div.innerHTML;
+return div.innerHTML;
+}
+
+function renderFlightCard(
+flight,
+isConflict
+) {
+const card =
+document.createElement('div');
+
+card.className = 'flight-card';
+
+card.dataset.flightId =
+flight.id;
+
+/*
+
+* IMPORTANT:
+* Native dragging is ONLY used to move
+* a flight vertically between gates.
+*
+* It does NOT change the flight's
+* boarding or departure times.
+  */
+  card.draggable = true;
+
+const statusClass =
+isConflict
+? 'status-conflict'
+: flight.status === 'DELAYED'
+? 'status-delayed'
+: (
+flight.status === 'CANCELLED' ||
+flight.status === 'DIVERTED'
+)
+? 'status-cancelled'
+: '';
+
+if (statusClass) {
+card.classList.add(statusClass);
+}
+
+const stripeColor =
+CONFIG.AIRLINE_COLORS[
+flight.airline
+] || '#3E7BFA';
+
+if (
+!isConflict &&
+flight.status !== 'DELAYED' &&
+flight.status !== 'CANCELLED' &&
+flight.status !== 'DIVERTED'
+) {
+card.style.borderLeftColor =
+stripeColor;
+}
+
+const pillClass =
+isConflict
+? 'pill-conflict'
+: statusPillClass(
+flight.status
+);
+
+const pillLabel =
+isConflict
+? 'CONFLICT'
+: flight.status;
+
+card.innerHTML = ` <div class="fc-top"> <span class="fc-flightnum">
+${escapeHtml(flight.flightNumber)} </span>
+
+```
+  <span class="fc-to">
+    → ${escapeHtml(flight.to)}
+  </span>
+</div>
+
+<div class="fc-times">
+  <span>Board ${escapeHtml(flight.boarding)}</span>
+  <span>Dep ${escapeHtml(flight.departure)}</span>
+</div>
+
+<div class="fc-status-line">
+  <span class="fc-status-pill ${pillClass}">
+    ${pillLabel}
+  </span>
+</div>
+
+${
+  flight.comments
+    ? `<div class="fc-comment">
+         ${escapeHtml(flight.comments)}
+       </div>`
+    : ''
+}
+
+${
+  isConflict
+    ? `<div class="fc-conflict-note">
+         Overlaps another aircraft at this gate
+       </div>`
+    : ''
+}
+
+${
+  !isConflict &&
+  isWrongAirlineGate(flight)
+    ? `<div class="fc-wrong-airline-note">
+         On a ${escapeHtml(
+           GATE_BY_ID[flight.gate].airline
+         )} gate
+       </div>`
+    : ''
+}
+
+<div
+  class="resize-handle resize-left"
+  title="Drag to change boarding time"
+></div>
+
+<div
+  class="resize-handle resize-right"
+  title="Drag to change departure time"
+></div>
+```
+
+`;
+
+/*
+
+* Clicking opens the flight editor.
+  */
+  card.addEventListener(
+  'click',
+  () => {
+  if (
+  card.classList.contains(
+  'was-dragged'
+  )
+  ) {
+  return;
+  }
+
+  openFlightModal(
+  flight.id
+  );
+  }
+  );
+
+/*
+
+* DRAG START
+*
+* Only the flight ID is stored.
+* No time values are modified.
+  */
+  card.addEventListener(
+  'dragstart',
+  e => {
+  e.dataTransfer.effectAllowed =
+  'move';
+
+  e.dataTransfer.setData(
+  'text/plain',
+  flight.id
+  );
+
+  card.classList.add(
+  'dragging'
+  );
+  }
+  );
+
+/*
+
+* DRAG END
+*
+* Again, no time calculations happen here.
+  */
+  card.addEventListener(
+  'dragend',
+  () => {
+  card.classList.remove(
+  'dragging'
+  );
+  }
+  );
+
+return card;
 }
 
 // ---------- Timeline geometry ----------
 
 const TIMELINE_START_MIN =
-  timeToMinutes(
-    CONFIG.TIMELINE_START
-  ) ?? 300;
+timeToMinutes(
+CONFIG.TIMELINE_START
+) ?? 300;
 
 const TIMELINE_END_MIN =
-  timeToMinutes(
-    CONFIG.TIMELINE_END
-  ) ?? 1440;
+timeToMinutes(
+CONFIG.TIMELINE_END
+) ?? 1440;
 
 const INTERVAL_MIN =
-  CONFIG.INTERVAL_MINUTES || 15;
+CONFIG.INTERVAL_MINUTES || 15;
 
 const COL_WIDTH =
-  CONFIG.COLUMN_WIDTH_PX || 60;
+CONFIG.COLUMN_WIDTH_PX || 60;
 
 const TOTAL_COLUMNS =
-  Math.ceil(
-    (
-      TIMELINE_END_MIN -
-      TIMELINE_START_MIN
-    ) / INTERVAL_MIN
-  );
+Math.ceil(
+(TIMELINE_END_MIN -
+TIMELINE_START_MIN) /
+INTERVAL_MIN
+);
 
 const TIMELINE_WIDTH =
-  TOTAL_COLUMNS * COL_WIDTH;
+TOTAL_COLUMNS *
+COL_WIDTH;
 
 function minutesToX(mins) {
-  return (
-    (
-      mins -
-      TIMELINE_START_MIN
-    ) /
-    INTERVAL_MIN
-  ) * COL_WIDTH;
+return (
+((mins -
+TIMELINE_START_MIN) /
+INTERVAL_MIN) *
+COL_WIDTH
+);
 }
 
 function renderTimeHeader() {
-  const header =
-    document.createElement('div');
+const header =
+document.createElement('div');
 
-  header.className =
-    'time-header';
+header.className =
+'time-header';
 
-  header.style.width =
-    TIMELINE_WIDTH + 'px';
+header.style.width =
+TIMELINE_WIDTH + 'px';
 
-  for (
-    let i = 0;
-    i < TOTAL_COLUMNS;
-    i++
-  ) {
-    const mins =
-      TIMELINE_START_MIN +
-      i * INTERVAL_MIN;
+for (
+let i = 0;
+i < TOTAL_COLUMNS;
+i++
+) {
+const mins =
+TIMELINE_START_MIN +
+i * INTERVAL_MIN;
 
-    const cell =
-      document.createElement('div');
+```
+const cell =
+  document.createElement('div');
 
-    cell.className =
-      'time-cell' +
-      (
-        mins % 60 === 0
-          ? ' time-cell-hour'
-          : ''
-      );
+cell.className =
+  'time-cell' +
+  (
+    mins % 60 === 0
+      ? ' time-cell-hour'
+      : ''
+  );
 
-    cell.style.width =
-      COL_WIDTH + 'px';
+cell.style.width =
+  COL_WIDTH + 'px';
 
-    cell.textContent =
-      mins % 60 === 0
-        ? minutesToTime(mins)
-        : '';
+cell.textContent =
+  mins % 60 === 0
+    ? minutesToTime(mins)
+    : '';
 
-    header.appendChild(cell);
-  }
+header.appendChild(cell);
+```
 
-  return header;
 }
 
+return header;
+}
+
+// ---------- Board ----------
+
 function renderBoard() {
-  const board =
-    document.getElementById(
-      'board'
+const board =
+document.getElementById(
+'board'
+);
+
+board.innerHTML = '';
+
+const conflicts =
+computeConflicts();
+
+updateConflictBanner(
+conflicts
+);
+
+const scrollArea =
+document.createElement('div');
+
+scrollArea.className =
+'timeline-scroll';
+
+// Header
+const headerRow =
+document.createElement('div');
+
+headerRow.className =
+'timeline-header-row';
+
+const corner =
+document.createElement('div');
+
+corner.className =
+'corner-cell';
+
+corner.textContent =
+'GATE';
+
+headerRow.appendChild(
+corner
+);
+
+headerRow.appendChild(
+renderTimeHeader()
+);
+
+scrollArea.appendChild(
+headerRow
+);
+
+// Concourses
+CONCOURSES.forEach(
+concourse => {
+
+```
+  const gatesInConcourse =
+    GATE_LIST.filter(
+      g =>
+        g.concourse ===
+        concourse
     );
 
-  board.innerHTML = '';
+  const airlinesHere =
+    [
+      ...new Set(
+        gatesInConcourse.map(
+          g => g.airline
+        )
+      )
+    ];
 
-  const conflicts =
-    computeConflicts();
+  const labelRow =
+    document.createElement(
+      'div'
+    );
 
-  updateConflictBanner(
-    conflicts
+  labelRow.className =
+    'concourse-label-row';
+
+  const labelCorner =
+    document.createElement(
+      'div'
+    );
+
+  labelCorner.className =
+    'corner-cell concourse-corner';
+
+  labelRow.appendChild(
+    labelCorner
   );
 
-  const scrollArea =
-    document.createElement('div');
+  const labelBody =
+    document.createElement(
+      'div'
+    );
 
-  scrollArea.className =
-    'timeline-scroll';
+  labelBody.className =
+    'concourse-label-body';
 
-  const headerRow =
-    document.createElement('div');
+  labelBody.style.width =
+    TIMELINE_WIDTH + 'px';
 
-  headerRow.className =
-    'timeline-header-row';
+  labelBody.innerHTML = `
+    <span class="concourse-title">
+      CONCOURSE ${concourse}
+    </span>
 
-  const corner =
-    document.createElement('div');
+    <span class="concourse-sub">
+      ${airlinesHere.join(' · ')}
+    </span>
+  `;
 
-  corner.className =
-    'corner-cell';
-
-  corner.textContent =
-    'GATE';
-
-  headerRow.appendChild(
-    corner
-  );
-
-  headerRow.appendChild(
-    renderTimeHeader()
+  labelRow.appendChild(
+    labelBody
   );
 
   scrollArea.appendChild(
-    headerRow
+    labelRow
   );
 
-  CONCOURSES.forEach(
-    concourse => {
-      const gatesInConcourse =
-        GATE_LIST.filter(
-          g =>
-            g.concourse ===
-            concourse
-        );
+  // Gates
+  gatesInConcourse.forEach(
+    gate => {
 
-      const airlinesHere = [
-        ...new Set(
-          gatesInConcourse.map(
-            g => g.airline
-          )
-        )
-      ];
-
-      const labelRow =
+      const row =
         document.createElement(
           'div'
         );
 
-      labelRow.className =
-        'concourse-label-row';
+      row.className =
+        'timeline-row';
 
-      const labelCorner =
+      const gateIdEl =
         document.createElement(
           'div'
         );
 
-      labelCorner.className =
-        'corner-cell concourse-corner';
+      gateIdEl.className =
+        'gate-id-cell';
 
-      labelRow.appendChild(
-        labelCorner
-      );
+      gateIdEl.textContent =
+        gate.id;
 
-      const labelBody =
+      const track =
         document.createElement(
           'div'
         );
 
-      labelBody.className =
-        'concourse-label-body';
+      track.className =
+        'gate-track';
 
-      labelBody.style.width =
+      track.style.width =
         TIMELINE_WIDTH + 'px';
 
-      labelBody.innerHTML = `
-        <span class="concourse-title">
-          CONCOURSE ${concourse}
-        </span>
+      track.style.backgroundSize =
+        `${COL_WIDTH}px 100%`;
 
-        <span class="concourse-sub">
-          ${airlinesHere.join(
-            ' · '
-          )}
-        </span>
-      `;
+      track.dataset.gateId =
+        gate.id;
 
-      labelRow.appendChild(
-        labelBody
-      );
+      track.dataset.airline =
+        gate.airline;
 
-      scrollArea.appendChild(
-        labelRow
-      );
+      const flightsHere =
+        FLIGHTS.filter(
+          f =>
+            f.gate === gate.id &&
+            flightMatchesFilters(f)
+        );
 
-      gatesInConcourse.forEach(
-        gate => {
-          const row =
-            document.createElement(
-              'div'
+      flightsHere.forEach(
+        f => {
+
+          const win =
+            occupancyWindow(f);
+
+          const card =
+            renderFlightCard(
+              f,
+              conflicts.has(f.id)
             );
 
-          row.className =
-            'timeline-row';
+          if (win) {
 
-          const gateIdEl =
-            document.createElement(
-              'div'
-            );
-
-          gateIdEl.className =
-            'gate-id-cell';
-
-          gateIdEl.textContent =
-            gate.id;
-
-          const track =
-            document.createElement(
-              'div'
-            );
-
-          track.className =
-            'gate-track';
-
-          track.style.width =
-            TIMELINE_WIDTH + 'px';
-
-          track.style.backgroundSize =
-            `${COL_WIDTH}px 100%`;
-
-          track.dataset.gateId =
-            gate.id;
-
-          track.dataset.airline =
-            gate.airline;
-
-          const flightsHere =
-            FLIGHTS.filter(
-              f =>
-                f.gate === gate.id &&
-                flightMatchesFilters(f)
-            );
-
-          flightsHere.forEach(
-            f => {
-              const win =
-                occupancyWindow(f);
-
-              const card =
-                renderFlightCard(
-                  f,
-                  conflicts.has(f.id)
-                );
-
-              if (win) {
-                const left =
-                  Math.max(
-                    minutesToX(
-                      win.start
-                    ),
-                    0
-                  );
-
-                const width =
-                  Math.max(
-                    minutesToX(
-                      win.end
-                    ) -
-                    minutesToX(
-                      win.start
-                    ),
-                    40
-                  );
-
-                card.style.position =
-                  'absolute';
-
-                card.style.left =
-                  left + 'px';
-
-                card.style.width =
-                  width + 'px';
-
-              } else {
-                card.style.position =
-                  'absolute';
-
-                card.style.left =
-                  '0px';
-
-                card.style.width =
-                  '150px';
-              }
-
-              track.appendChild(
-                card
+            const left =
+              Math.max(
+                minutesToX(
+                  win.start
+                ),
+                0
               );
 
-              attachResizeHandlers(
-                card,
-                f
+            const width =
+              Math.max(
+                minutesToX(
+                  win.end
+                ) -
+                minutesToX(
+                  win.start
+                ),
+                40
               );
-            }
+
+            card.style.position =
+              'absolute';
+
+            card.style.left =
+              left + 'px';
+
+            card.style.width =
+              width + 'px';
+
+          } else {
+
+            card.style.position =
+              'absolute';
+
+            card.style.left =
+              '0px';
+
+            card.style.width =
+              '150px';
+          }
+
+          track.appendChild(
+            card
           );
 
-          attachDropHandlers(
-            track
-          );
-
-          row.appendChild(
-            gateIdEl
-          );
-
-          row.appendChild(
-            track
-          );
-
-          scrollArea.appendChild(
-            row
+          attachResizeHandlers(
+            card,
+            f
           );
         }
       );
+
+      attachDropHandlers(
+        track
+      );
+
+      row.appendChild(
+        gateIdEl
+      );
+
+      row.appendChild(
+        track
+      );
+
+      scrollArea.appendChild(
+        row
+      );
     }
   );
+}
+```
 
-  board.appendChild(
-    scrollArea
-  );
+);
+
+board.appendChild(
+scrollArea
+);
 }
 
 // ---------- Resize handlers ----------
 
 function attachResizeHandlers(
-  card,
-  flight
+card,
+flight
 ) {
-  const leftHandle =
-    card.querySelector(
-      '.resize-left'
-    );
+const leftHandle =
+card.querySelector(
+'.resize-left'
+);
 
-  const rightHandle =
-    card.querySelector(
-      '.resize-right'
-    );
+const rightHandle =
+card.querySelector(
+'.resize-right'
+);
 
-  const pxPerMin =
-    COL_WIDTH /
+const pxPerMin =
+COL_WIDTH /
+INTERVAL_MIN;
+
+function startResize(
+e,
+isLeft
+) {
+
+```
+e.stopPropagation();
+e.preventDefault();
+
+/*
+ * Disable native card dragging
+ * while resizing.
+ */
+card.draggable = false;
+
+const startX =
+  e.clientX;
+
+const baseLeft =
+  parseFloat(
+    card.style.left
+  );
+
+const baseWidth =
+  parseFloat(
+    card.style.width
+  );
+
+function onMoveSimple(ev) {
+
+  const dx =
+    ev.clientX -
+    startX;
+
+  if (isLeft) {
+
+    let newLeft =
+      baseLeft + dx;
+
+    let newWidth =
+      baseWidth - dx;
+
+    if (newWidth < 30) {
+
+      newWidth = 30;
+
+      newLeft =
+        baseLeft +
+        (baseWidth - 30);
+    }
+
+    card.style.left =
+      newLeft + 'px';
+
+    card.style.width =
+      newWidth + 'px';
+
+  } else {
+
+    let newWidth =
+      baseWidth + dx;
+
+    if (newWidth < 30) {
+      newWidth = 30;
+    }
+
+    card.style.width =
+      newWidth + 'px';
+  }
+}
+
+function onUp(ev) {
+
+  document.removeEventListener(
+    'mousemove',
+    onMoveSimple
+  );
+
+  document.removeEventListener(
+    'mouseup',
+    onUp
+  );
+
+  card.draggable = true;
+
+  const dx =
+    ev.clientX -
+    startX;
+
+  const deltaMinRaw =
+    dx / pxPerMin;
+
+  const deltaMin =
+    Math.round(
+      deltaMinRaw /
+      INTERVAL_MIN
+    ) *
     INTERVAL_MIN;
 
-  function startResize(
-    e,
-    isLeft
-  ) {
-    e.stopPropagation();
-    e.preventDefault();
+  /*
+   * ONLY resizing the LEFT handle
+   * changes boarding time.
+   */
+  if (isLeft) {
 
-    card.draggable = false;
-
-    const startX =
-      e.clientX;
-
-    const baseLeft =
-      parseFloat(
-        card.style.left
-      );
-
-    const baseWidth =
-      parseFloat(
-        card.style.width
-      );
-
-    function onMoveSimple(ev) {
-      const dx =
-        ev.clientX -
-        startX;
-
-      if (isLeft) {
-        let newLeft =
-          baseLeft + dx;
-
-        let newWidth =
-          baseWidth - dx;
-
-        if (newWidth < 30) {
-          newWidth = 30;
-
-          newLeft =
-            baseLeft +
-            (baseWidth - 30);
-        }
-
-        card.style.left =
-          newLeft + 'px';
-
-        card.style.width =
-          newWidth + 'px';
-
-      } else {
-        let newWidth =
-          baseWidth + dx;
-
-        if (newWidth < 30) {
-          newWidth = 30;
-        }
-
-        card.style.width =
-          newWidth + 'px';
-      }
-    }
-
-    function onUp(ev) {
-      document.removeEventListener(
-        'mousemove',
-        onMoveSimple
-      );
-
-      document.removeEventListener(
-        'mouseup',
-        onUp
-      );
-
-      card.draggable = true;
-
-      const dx =
-        ev.clientX -
-        startX;
-
-      const deltaMinRaw =
-        dx / pxPerMin;
-
-      const deltaMin =
-        Math.round(
-          deltaMinRaw /
-          INTERVAL_MIN
-        ) *
-        INTERVAL_MIN;
-
-      if (isLeft) {
-        const win =
-          occupancyWindow(
-            flight
-          );
-
-        const baseStart =
-          win
-            ? win.start
-            : (
-                toTimelineMinutes(
-                  flight.departure
-                ) -
-                CONFIG.TURNAROUND_MINUTES
-              );
-
-        flight.boarding =
-          minutesToClockString(
-            baseStart +
-            deltaMin
-          );
-
-      } else {
-        const dep =
-          toTimelineMinutes(
-            flight.departure
-          ) ?? 0;
-
-        flight.departure =
-          minutesToClockString(
-            dep +
-            deltaMin
-          );
-      }
-
-      renderBoard();
-
-      pushFlightToSheet(
+    const win =
+      occupancyWindow(
         flight
-      ).catch(() => {
-        alert(
-          'Resized locally, but could not sync the new time to the sheet.'
-        );
-      });
-    }
+      );
 
-    document.addEventListener(
-      'mousemove',
-      onMoveSimple
-    );
+    const baseStart =
+      win
+        ? win.start
+        : (
+            toTimelineMinutes(
+              flight.departure
+            ) -
+            CONFIG.TURNAROUND_MINUTES
+          );
 
-    document.addEventListener(
-      'mouseup',
-      onUp
-    );
+    flight.boarding =
+      minutesToClockString(
+        baseStart +
+        deltaMin
+      );
+
+  } else {
+
+    /*
+     * ONLY resizing the RIGHT handle
+     * changes departure time.
+     */
+    const dep =
+      toTimelineMinutes(
+        flight.departure
+      ) ?? 0;
+
+    flight.departure =
+      minutesToClockString(
+        dep +
+        deltaMin
+      );
   }
-
-  leftHandle.addEventListener(
-    'mousedown',
-    e =>
-      startResize(e, true)
-  );
-
-  rightHandle.addEventListener(
-    'mousedown',
-    e =>
-      startResize(e, false)
-  );
-}
-
-// ---------- Drag and drop ----------
-
-function attachDropHandlers(
-  track
-) {
-  track.addEventListener(
-    'dragover',
-    e => {
-      e.preventDefault();
-
-      track.classList.add(
-        'drag-over'
-      );
-    }
-  );
-
-  track.addEventListener(
-    'dragleave',
-    () => {
-      track.classList.remove(
-        'drag-over'
-      );
-    }
-  );
-
-  track.addEventListener(
-    'drop',
-    e => {
-      e.preventDefault();
-
-      track.classList.remove(
-        'drag-over'
-      );
-
-      const flightId =
-        e.dataTransfer.getData(
-          'text/plain'
-        );
-
-      handleGateDrop(
-        flightId,
-        track.dataset.gateId,
-        track.dataset.airline
-      );
-    }
-  );
-}
-
-function updateConflictBanner(
-  conflicts
-) {
-  const banner =
-    document.getElementById(
-      'conflictBanner'
-    );
-
-  if (conflicts.size === 0) {
-    banner.classList.add(
-      'hidden'
-    );
-
-    return;
-  }
-
-  banner.classList.remove(
-    'hidden'
-  );
-
-  const names = [
-    ...conflicts.keys()
-  ]
-    .map(
-      id =>
-        FLIGHTS.find(
-          f => f.id === id
-        )
-    )
-    .filter(Boolean)
-    .map(
-      f =>
-        f.flightNumber
-    );
-
-  banner.textContent =
-    `⚠ ${conflicts.size} gate conflict${
-      conflicts.size > 1
-        ? 's'
-        : ''
-    }: ${names.join(
-      ', '
-    )} — reassign or adjust times`;
-}
-
-// ---------- Gate drop ----------
-
-function handleGateDrop(
-  flightId,
-  newGate,
-  gateOwner
-) {
-  const flight =
-    FLIGHTS.find(
-      f => f.id === flightId
-    );
-
-  if (
-    !flight ||
-    flight.gate === newGate
-  ) {
-    return;
-  }
-
-  if (
-    gateOwner &&
-    !airlinesMatch(
-      gateOwner,
-      flight.airline
-    )
-  ) {
-    const proceed =
-      confirm(
-        `Gate ${newGate} belongs to ${gateOwner}, but ${flight.flightNumber} is a ${flight.airline} flight.\n\nMove it here anyway?`
-      );
-
-    if (!proceed) return;
-  }
-
-  const oldGate =
-    flight.gate;
-
-  flight.gate =
-    newGate;
 
   renderBoard();
 
-  pushFlightToSheet(
-    flight
-  ).catch(() => {
-    flight.gate =
-      oldGate;
+  if (SHEET_URL) {
 
-    renderBoard();
+    pushFlightToSheet(
+      flight
+    ).catch(() => {
 
-    alert(
-      'Could not save gate change to the sheet. Reverted. Check your connection and try again.'
+      alert(
+        'Resized locally, but could not sync the new time to the sheet.'
+      );
+
+    });
+  }
+}
+
+document.addEventListener(
+  'mousemove',
+  onMoveSimple
+);
+
+document.addEventListener(
+  'mouseup',
+  onUp
+);
+```
+
+}
+
+leftHandle.addEventListener(
+'mousedown',
+e =>
+startResize(
+e,
+true
+)
+);
+
+rightHandle.addEventListener(
+'mousedown',
+e =>
+startResize(
+e,
+false
+)
+);
+}
+
+// ---------- Gate drag/drop ----------
+
+function attachDropHandlers(
+track
+) {
+
+track.addEventListener(
+'dragover',
+e => {
+
+```
+  e.preventDefault();
+
+  e.dataTransfer.dropEffect =
+    'move';
+
+  track.classList.add(
+    'drag-over'
+  );
+}
+```
+
+);
+
+track.addEventListener(
+'dragleave',
+() => {
+
+```
+  track.classList.remove(
+    'drag-over'
+  );
+}
+```
+
+);
+
+track.addEventListener(
+'drop',
+e => {
+
+```
+  e.preventDefault();
+
+  track.classList.remove(
+    'drag-over'
+  );
+
+  const flightId =
+    e.dataTransfer.getData(
+      'text/plain'
     );
-  });
+
+  const newGate =
+    track.dataset.gateId;
+
+  const gateOwner =
+    track.dataset.airline;
+
+  handleGateDrop(
+    flightId,
+    newGate,
+    gateOwner
+  );
+}
+```
+
+);
+}
+
+function handleGateDrop(
+flightId,
+newGate,
+gateOwner
+) {
+
+const flight =
+FLIGHTS.find(
+f => f.id === flightId
+);
+
+if (
+!flight ||
+flight.gate === newGate
+) {
+return;
+}
+
+if (
+gateOwner &&
+!airlinesMatch(
+gateOwner,
+flight.airline
+)
+) {
+
+```
+const proceed =
+  confirm(
+    `Gate ${newGate} belongs to ${gateOwner}, but ${flight.flightNumber} is a ${flight.airline} flight.\n\nMove it here anyway?`
+  );
+
+if (!proceed) {
+  return;
+}
+```
+
+}
+
+/*
+
+* IMPORTANT:
+*
+* Save the original times before
+* changing the gate.
+*
+* This guarantees that moving the
+* card vertically cannot alter:
+*
+* * boarding time
+* * departure time
+    */
+    const originalBoarding =
+    flight.boarding;
+
+const originalDeparture =
+flight.departure;
+
+const oldGate =
+flight.gate;
+
+/*
+
+* ONLY CHANGE THE GATE.
+  */
+  flight.gate =
+  newGate;
+
+/*
+
+* Explicitly preserve the times.
+  */
+  flight.boarding =
+  originalBoarding;
+
+flight.departure =
+originalDeparture;
+
+renderBoard();
+
+if (SHEET_URL) {
+
+```
+pushFlightToSheet(
+  flight
+).catch(() => {
+
+  /*
+   * Revert ONLY the gate.
+   * Times remain untouched.
+   */
+  flight.gate =
+    oldGate;
+
+  flight.boarding =
+    originalBoarding;
+
+  flight.departure =
+    originalDeparture;
+
+  renderBoard();
+
+  alert(
+    'Could not save gate change to the sheet. Reverted. Check your connection and try again.'
+  );
+});
+```
+
+}
 }
 
 // ---------- Flight modal ----------
 
 function populateAirlineOptions() {
-  const select =
-    document.getElementById(
-      'f_airline'
-    );
 
-  const fromConfig =
-    CONFIG.GATE_MAP.map(
-      g => g.airline
-    );
+const select =
+document.getElementById(
+'f_airline'
+);
 
-  const fromFlights =
-    FLIGHTS.map(
-      f => f.airline
-    );
+const fromConfig =
+CONFIG.GATE_MAP.map(
+g => g.airline
+);
 
-  const airlines = [
-    ...new Set([
-      ...fromConfig,
-      ...fromFlights
-    ])
-  ]
-    .filter(Boolean)
-    .sort();
+const fromFlights =
+FLIGHTS.map(
+f => f.airline
+);
 
-  select.innerHTML =
-    airlines
-      .map(
-        a =>
-          `<option value="${escapeHtml(a)}">${escapeHtml(a)}</option>`
-      )
-      .join('');
+const airlines =
+[
+...new Set([
+...fromConfig,
+...fromFlights
+])
+]
+.filter(Boolean)
+.sort();
+
+select.innerHTML =
+airlines
+.map(
+a =>
+`<option value="${escapeHtml(a)}">${escapeHtml(a)}</option>`
+)
+.join('');
 }
 
 function populateGateDatalist() {
-  const list =
-    document.getElementById(
-      'gateList'
-    );
 
-  list.innerHTML =
-    GATE_LIST
-      .map(
-        g =>
-          `<option value="${g.id}">`
-      )
-      .join('');
+const list =
+document.getElementById(
+'gateList'
+);
+
+list.innerHTML =
+GATE_LIST
+.map(
+g =>
+`<option value="${escapeHtml(g.id)}">`
+)
+.join('');
 }
 
 function openFlightModal(
-  flightId
+flightId
 ) {
-  populateAirlineOptions();
 
-  const modal =
+populateAirlineOptions();
+
+const modal =
+document.getElementById(
+'flightModal'
+);
+
+const isEdit =
+!!flightId;
+
+document.getElementById(
+'modalTitle'
+).textContent =
+isEdit
+? 'Edit Flight'
+: 'Add Flight';
+
+document.getElementById(
+'deleteFlightBtn'
+).classList.toggle(
+'hidden',
+!isEdit
+);
+
+document.getElementById(
+'suggestBox'
+).classList.add(
+'hidden'
+);
+
+const flight =
+isEdit
+? FLIGHTS.find(
+f =>
+f.id === flightId
+)
+: null;
+
+document.getElementById(
+'f_id'
+).value =
+isEdit
+? flight.id
+: '';
+
+document.getElementById(
+'f_airline'
+).value =
+isEdit
+? flight.airline
+: CONFIG.GATE_MAP[0].airline;
+
+document.getElementById(
+'f_flightnum'
+).value =
+isEdit
+? flight.flightNumber
+: '';
+
+document.getElementById(
+'f_to'
+).value =
+isEdit
+? flight.to
+: '';
+
+document.getElementById(
+'f_gate'
+).value =
+isEdit
+? flight.gate
+: '';
+
+document.getElementById(
+'f_boarding'
+).value =
+isEdit
+? flight.boarding
+: '';
+
+document.getElementById(
+'f_departure'
+).value =
+isEdit
+? flight.departure
+: '';
+
+document.getElementById(
+'f_status'
+).value =
+isEdit
+? flight.status
+: 'ON TIME';
+
+document.getElementById(
+'f_comments'
+).value =
+isEdit
+? flight.comments
+: '';
+
+if (isEdit) {
+
+```
+const conflicts =
+  computeConflicts();
+
+if (
+  conflicts.has(
+    flight.id
+  ) ||
+  flight.status ===
+    'DELAYED'
+) {
+
+  const suggestions =
+    suggestGatesFor(
+      flight,
+      flight.gate
+    );
+
+  const box =
     document.getElementById(
-      'flightModal'
-    );
-
-  const isEdit =
-    !!flightId;
-
-  document.getElementById(
-    'modalTitle'
-  ).textContent =
-    isEdit
-      ? 'Edit Flight'
-      : 'Add Flight';
-
-  document
-    .getElementById(
-      'deleteFlightBtn'
-    )
-    .classList.toggle(
-      'hidden',
-      !isEdit
-    );
-
-  document
-    .getElementById(
       'suggestBox'
-    )
-    .classList.add(
+    );
+
+  if (suggestions.length) {
+
+    box.classList.remove(
       'hidden'
     );
 
-  const flight =
-    isEdit
-      ? FLIGHTS.find(
-          f =>
-            f.id ===
-            flightId
+    box.innerHTML =
+      `<strong>Suggested open gates for ${escapeHtml(flight.airline)}:</strong><br/>` +
+      suggestions
+        .map(
+          g =>
+            `<span class="suggest-option" data-gate="${escapeHtml(g)}">${escapeHtml(g)}</span>`
         )
-      : null;
+        .join('');
 
-  document.getElementById(
-    'f_id'
-  ).value =
-    isEdit
-      ? flight.id
-      : '';
+    box
+      .querySelectorAll(
+        '.suggest-option'
+      )
+      .forEach(
+        el => {
 
-  document.getElementById(
-    'f_airline'
-  ).value =
-    isEdit
-      ? flight.airline
-      : CONFIG.GATE_MAP[0].airline;
+          el.addEventListener(
+            'click',
+            () => {
 
-  document.getElementById(
-    'f_flightnum'
-  ).value =
-    isEdit
-      ? flight.flightNumber
-      : '';
+              document.getElementById(
+                'f_gate'
+              ).value =
+                el.dataset.gate;
+            }
+          );
+        }
+      );
 
-  document.getElementById(
-    'f_to'
-  ).value =
-    isEdit
-      ? flight.to
-      : '';
+  } else {
 
-  document.getElementById(
-    'f_gate'
-  ).value =
-    isEdit
-      ? flight.gate
-      : '';
+    box.classList.remove(
+      'hidden'
+    );
 
-  document.getElementById(
-    'f_boarding'
-  ).value =
-    isEdit
-      ? flight.boarding
-      : '';
-
-  document.getElementById(
-    'f_departure'
-  ).value =
-    isEdit
-      ? flight.departure
-      : '';
-
-  document.getElementById(
-    'f_status'
-  ).value =
-    isEdit
-      ? flight.status
-      : 'ON TIME';
-
-  document.getElementById(
-    'f_comments'
-  ).value =
-    isEdit
-      ? flight.comments
-      : '';
-
-  if (isEdit) {
-    const conflicts =
-      computeConflicts();
-
-    if (
-      conflicts.has(
-        flight.id
-      ) ||
-      flight.status ===
-        'DELAYED'
-    ) {
-      const suggestions =
-        suggestGatesFor(
-          flight,
-          flight.gate
-        );
-
-      const box =
-        document.getElementById(
-          'suggestBox'
-        );
-
-      if (
-        suggestions.length
-      ) {
-        box.classList.remove(
-          'hidden'
-        );
-
-        box.innerHTML =
-          `<strong>Suggested open gates for ${escapeHtml(flight.airline)}:</strong><br/>` +
-          suggestions
-            .map(
-              g =>
-                `<span class="suggest-option" data-gate="${g}">${g}</span>`
-            )
-            .join('');
-
-        box
-          .querySelectorAll(
-            '.suggest-option'
-          )
-          .forEach(el => {
-            el.addEventListener(
-              'click',
-              () => {
-                document.getElementById(
-                  'f_gate'
-                ).value =
-                  el.dataset.gate;
-              }
-            );
-          });
-
-      } else {
-        box.classList.remove(
-          'hidden'
-        );
-
-        box.innerHTML =
-          `<strong>No open ${escapeHtml(flight.airline)} gates found in this window.</strong> Consider adjusting the time or checking a neighboring concourse manually.`;
-      }
-    }
+    box.innerHTML =
+      `<strong>No open ${escapeHtml(flight.airline)} gates found in this window.</strong> Consider adjusting the time or checking a neighboring concourse manually.`;
   }
+}
+```
 
-  modal.classList.remove(
-    'hidden'
-  );
+}
+
+modal.classList.remove(
+'hidden'
+);
 }
 
 function closeFlightModal() {
-  document
-    .getElementById(
-      'flightModal'
-    )
-    .classList.add(
-      'hidden'
-    );
+
+document.getElementById(
+'flightModal'
+).classList.add(
+'hidden'
+);
 }
 
-// ---------- Flight form ----------
+// ---------- Add / Edit flight ----------
 
 document
-  .getElementById(
-    'flightForm'
-  )
-  .addEventListener(
-    'submit',
-    e => {
-      e.preventDefault();
+.getElementById(
+'flightForm'
+)
+.addEventListener(
+'submit',
+e => {
 
-      const id =
-        document.getElementById(
-          'f_id'
-        ).value ||
-        `f_${Date.now()}`;
+```
+  e.preventDefault();
 
-      const flightData = {
-        id,
+  const id =
+    document.getElementById(
+      'f_id'
+    ).value ||
+    `f_${Date.now()}`;
 
-        airline:
-          document.getElementById(
-            'f_airline'
-          ).value,
+  const flightData = {
 
-        flightNumber:
-          document.getElementById(
-            'f_flightnum'
-          ).value.trim(),
+    id,
 
-        to:
-          document.getElementById(
-            'f_to'
-          ).value
-            .trim()
-            .toUpperCase(),
+    airline:
+      document.getElementById(
+        'f_airline'
+      ).value,
 
-        gate:
-          document.getElementById(
-            'f_gate'
-          ).value
-            .trim()
-            .toUpperCase(),
+    flightNumber:
+      document.getElementById(
+        'f_flightnum'
+      ).value.trim(),
 
-        boarding:
-          document.getElementById(
-            'f_boarding'
-          ).value,
+    to:
+      document.getElementById(
+        'f_to'
+      ).value
+        .trim()
+        .toUpperCase(),
 
-        departure:
-          document.getElementById(
-            'f_departure'
-          ).value,
+    gate:
+      document.getElementById(
+        'f_gate'
+      ).value
+        .trim()
+        .toUpperCase(),
 
-        status:
-          document.getElementById(
-            'f_status'
-          ).value,
+    boarding:
+      document.getElementById(
+        'f_boarding'
+      ).value,
 
-        comments:
-          document.getElementById(
-            'f_comments'
-          ).value.trim()
-      };
+    departure:
+      document.getElementById(
+        'f_departure'
+      ).value,
 
-      const gateInfo =
-        GATE_BY_ID[
-          flightData.gate
-        ];
+    status:
+      document.getElementById(
+        'f_status'
+      ).value,
 
-      if (
-        gateInfo &&
-        !airlinesMatch(
-          gateInfo.airline,
-          flightData.airline
-        )
-      ) {
-        const proceed =
-          confirm(
-            `Gate ${flightData.gate} belongs to ${gateInfo.airline}, but this is a ${flightData.airline} flight.\n\nSave it here anyway?`
-          );
+    comments:
+      document.getElementById(
+        'f_comments'
+      ).value.trim()
+  };
 
-        if (!proceed) {
-          return;
-        }
-      }
+  const gateInfo =
+    GATE_BY_ID[
+      flightData.gate
+    ];
 
-      const existingIdx =
-        FLIGHTS.findIndex(
-          f =>
-            f.id === id
-        );
+  if (
+    gateInfo &&
+    !airlinesMatch(
+      gateInfo.airline,
+      flightData.airline
+    )
+  ) {
 
-      if (
-        existingIdx >= 0
-      ) {
-        FLIGHTS[
-          existingIdx
-        ] = flightData;
-      } else {
-        FLIGHTS.push(
-          flightData
-        );
-      }
+    const proceed =
+      confirm(
+        `Gate ${flightData.gate} belongs to ${gateInfo.airline}, but this is a ${flightData.airline} flight.\n\nSave it here anyway?`
+      );
 
-      renderBoard();
-
-      closeFlightModal();
-
-      pushFlightToSheet(
-        flightData
-      ).catch(() => {
-        alert(
-          'Saved locally, but could not sync to the sheet. Check your connection.'
-        );
-      });
+    if (!proceed) {
+      return;
     }
-  );
+  }
+
+  const existingIdx =
+    FLIGHTS.findIndex(
+      f =>
+        f.id === id
+    );
+
+  if (
+    existingIdx >= 0
+  ) {
+
+    FLIGHTS[
+      existingIdx
+    ] =
+      flightData;
+
+  } else {
+
+    FLIGHTS.push(
+      flightData
+    );
+  }
+
+  renderBoard();
+
+  closeFlightModal();
+
+  if (SHEET_URL) {
+
+    pushFlightToSheet(
+      flightData
+    ).catch(() => {
+
+      alert(
+        'Saved locally, but could not sync to the sheet. Check your connection.'
+      );
+    });
+  }
+}
+```
+
+);
 
 // ---------- Delete flight ----------
 
 document
-  .getElementById(
-    'deleteFlightBtn'
-  )
-  .addEventListener(
-    'click',
-    () => {
-      const id =
-        document.getElementById(
-          'f_id'
-        ).value;
+.getElementById(
+'deleteFlightBtn'
+)
+.addEventListener(
+'click',
+() => {
 
-      if (!id) return;
+```
+  const id =
+    document.getElementById(
+      'f_id'
+    ).value;
 
-      if (
-        !confirm(
-          'Remove this flight from the board?'
-        )
-      ) {
-        return;
-      }
+  if (!id) return;
 
-      FLIGHTS =
-        FLIGHTS.filter(
-          f => f.id !== id
-        );
+  if (
+    !confirm(
+      'Remove this flight from the board?'
+    )
+  ) {
+    return;
+  }
 
-      renderBoard();
+  FLIGHTS =
+    FLIGHTS.filter(
+      f =>
+        f.id !== id
+    );
 
-      closeFlightModal();
+  renderBoard();
 
-      deleteFlightFromSheet(
-        id
-      ).catch(() => {
-        alert(
-          'Removed locally, but could not sync the removal to the sheet.'
-        );
-      });
-    }
-  );
+  closeFlightModal();
 
-// ---------- Modal buttons ----------
+  if (SHEET_URL) {
 
-document
-  .getElementById(
-    'addFlightBtn'
-  )
-  .addEventListener(
-    'click',
-    () =>
-      openFlightModal(null)
-  );
+    deleteFlightFromSheet(
+      id
+    ).catch(() => {
 
-document
-  .getElementById(
-    'modalClose'
-  )
-  .addEventListener(
-    'click',
-    closeFlightModal
-  );
+      alert(
+        'Removed locally, but could not sync the removal to the sheet.'
+      );
+    });
+  }
+}
+```
+
+);
+
+// ---------- Modal controls ----------
 
 document
-  .getElementById(
-    'modalCancel'
-  )
-  .addEventListener(
-    'click',
-    closeFlightModal
-  );
+.getElementById(
+'addFlightBtn'
+)
+.addEventListener(
+'click',
+() =>
+openFlightModal(null)
+);
+
+document
+.getElementById(
+'modalClose'
+)
+.addEventListener(
+'click',
+closeFlightModal
+);
+
+document
+.getElementById(
+'modalCancel'
+)
+.addEventListener(
+'click',
+closeFlightModal
+);
 
 // ---------- Search / filter ----------
 
 document
-  .getElementById(
-    'searchBox'
-  )
-  .addEventListener(
-    'input',
-    e => {
-      searchTerm =
-        e.target.value;
+.getElementById(
+'searchBox'
+)
+.addEventListener(
+'input',
+e => {
 
-      renderBoard();
-    }
-  );
+```
+  searchTerm =
+    e.target.value;
+
+  renderBoard();
+}
+```
+
+);
 
 document
-  .getElementById(
-    'statusFilter'
-  )
-  .addEventListener(
-    'change',
-    e => {
-      statusFilterVal =
-        e.target.value;
+.getElementById(
+'statusFilter'
+)
+.addEventListener(
+'change',
+e => {
 
-      renderBoard();
-    }
-  );
+```
+  statusFilterVal =
+    e.target.value;
+
+  renderBoard();
+}
+```
+
+);
 
 // ---------- Google Sheet sync ----------
 
 function setSyncStatus(
-  state,
-  label
+state,
+label
 ) {
-  const el =
-    document.getElementById(
-      'syncStatus'
-    );
 
-  el.className =
-    `sync-status sync-${state}`;
+const el =
+document.getElementById(
+'syncStatus'
+);
 
-  el.textContent =
-    label;
+el.className =
+`sync-status sync-${state}`;
+
+el.textContent =
+label;
 }
 
 async function loadFromSheet() {
-  setSyncStatus(
-    'offline',
-    '● Connecting…'
+
+if (!SHEET_URL) return;
+
+setSyncStatus(
+'offline',
+'● Connecting…'
+);
+
+try {
+
+```
+const res =
+  await fetch(
+    SHEET_URL +
+    '?action=list'
   );
 
-  try {
-    const res =
-      await fetch(
-        SHEET_URL +
-          '?action=list'
-      );
+const data =
+  await res.json();
 
-    if (!res.ok) {
-      throw new Error(
-        `HTTP ${res.status}`
-      );
-    }
+FLIGHTS =
+  data.map(
+    rowToFlight
+  );
 
-    const data =
-      await res.json();
+setSyncStatus(
+  'online',
+  `● Synced with sheet (${new Date().toLocaleTimeString()})`
+);
 
-    if (
-      !Array.isArray(data)
-    ) {
-      throw new Error(
-        'Invalid data returned from sheet'
-      );
-    }
+renderBoard();
+```
 
-    FLIGHTS =
-      data.map(
-        rowToFlight
-      );
+} catch (err) {
 
-    setSyncStatus(
-      'online',
-      `● Synced with sheet (${new Date().toLocaleTimeString()})`
-    );
+```
+console.error(err);
 
-    renderBoard();
+setSyncStatus(
+  'error',
+  '● Sheet connection failed — showing local data'
+);
+```
 
-  } catch (err) {
-    console.error(
-      'Sheet connection failed:',
-      err
-    );
-
-    setSyncStatus(
-      'error',
-      '● Sheet connection failed — showing local data'
-    );
-
-    FLIGHTS =
-      CONFIG.SAMPLE_FLIGHTS.map(
-        f => ({ ...f })
-      );
-
-    renderBoard();
-  }
+}
 }
 
-function rowToFlight(row) {
-  return {
-    id:
-      row.id ||
-      row['FLIGHT NUMBER'],
+function rowToFlight(
+row
+) {
 
-    airline:
-      row['AIRLINE'] ||
-      '',
+return {
 
-    flightNumber:
-      row['FLIGHT NUMBER'] ||
-      '',
+```
+id:
+  row.id ||
+  row['FLIGHT NUMBER'],
 
-    to:
-      row['TO:'] ||
-      '',
+airline:
+  row['AIRLINE'],
 
-    gate:
-      row['GATE:'] ||
-      '',
+flightNumber:
+  row['FLIGHT NUMBER'],
 
-    boarding:
-      row['BOARDING TIME:'] ||
-      '',
+to:
+  row['TO:'],
 
-    departure:
-      row['DEPARTURE TIME:'] ||
-      '',
+gate:
+  row['GATE:'],
 
-    status:
-      row['STATUS:'] ||
-      'ON TIME',
+boarding:
+  row['BOARDING TIME:'],
 
-    comments:
-      row['COMMENTS'] ||
-      ''
-  };
+departure:
+  row['DEPARTURE TIME:'],
+
+status:
+  row['STATUS:'] ||
+  'ON TIME',
+
+comments:
+  row['COMMENTS'] ||
+  ''
+```
+
+};
 }
 
 function flightToRow(
-  flight
+flight
 ) {
-  return {
-    id: flight.id,
 
-    'AIRLINE':
-      flight.airline,
+return {
 
-    'FLIGHT NUMBER':
-      flight.flightNumber,
+```
+id:
+  flight.id,
 
-    'TO:':
-      flight.to,
+'AIRLINE':
+  flight.airline,
 
-    'GATE:':
-      flight.gate,
+'FLIGHT NUMBER':
+  flight.flightNumber,
 
-    'BOARDING TIME:':
-      flight.boarding,
+'TO:':
+  flight.to,
 
-    'DEPARTURE TIME:':
-      flight.departure,
+'GATE:':
+  flight.gate,
 
-    'STATUS:':
-      flight.status,
+'BOARDING TIME:':
+  flight.boarding,
 
-    'COMMENTS':
-      flight.comments
-  };
+'DEPARTURE TIME:':
+  flight.departure,
+
+'STATUS:':
+  flight.status,
+
+'COMMENTS':
+  flight.comments
+```
+
+};
 }
 
 async function pushFlightToSheet(
-  flight
+flight
 ) {
-  setSyncStatus(
-    'online',
-    '● Saving…'
-  );
 
-  const params =
-    new URLSearchParams({
-      action: 'upsert',
-      row: JSON.stringify(
-        flightToRow(
-          flight
-        )
-      )
-    });
+if (!SHEET_URL) return;
 
-  const res =
-    await fetch(
-      SHEET_URL +
-        '?' +
-        params.toString()
-    );
+setSyncStatus(
+'online',
+'● Saving…'
+);
 
-  const data =
-    await res
-      .json()
-      .catch(
-        () => null
-      );
+const params =
+new URLSearchParams({
+action: 'upsert',
+row: JSON.stringify(
+flightToRow(flight)
+)
+});
 
-  if (
-    !res.ok ||
-    (
-      data &&
-      data.error
-    )
-  ) {
-    throw new Error(
-      data &&
-      data.error
-        ? data.error
-        : 'Sheet save failed'
-    );
-  }
+const res =
+await fetch(
+SHEET_URL +
+'?' +
+params.toString()
+);
 
-  setSyncStatus(
-    'online',
-    `● Synced with sheet (${new Date().toLocaleTimeString()})`
-  );
+const data =
+await res
+.json()
+.catch(
+() => null
+);
+
+if (
+!res.ok ||
+(
+data &&
+data.error
+)
+) {
+
+```
+throw new Error(
+  data &&
+  data.error
+    ? data.error
+    : 'Sheet save failed'
+);
+```
+
+}
+
+setSyncStatus(
+'online',
+`● Synced with sheet (${new Date().toLocaleTimeString()})`
+);
 }
 
 async function deleteFlightFromSheet(
-  id
+id
 ) {
-  const params =
-    new URLSearchParams({
-      action: 'delete',
-      id
-    });
 
-  const res =
-    await fetch(
-      SHEET_URL +
-        '?' +
-        params.toString()
-    );
+if (!SHEET_URL) return;
 
-  const data =
-    await res
-      .json()
-      .catch(
-        () => null
-      );
+const params =
+new URLSearchParams({
+action: 'delete',
+id
+});
 
-  if (
-    !res.ok ||
-    (
-      data &&
-      data.error
-    )
-  ) {
-    throw new Error(
-      data &&
-      data.error
-        ? data.error
-        : 'Sheet delete failed'
-    );
-  }
+const res =
+await fetch(
+SHEET_URL +
+'?' +
+params.toString()
+);
 
-  setSyncStatus(
-    'online',
-    `● Synced with sheet (${new Date().toLocaleTimeString()})`
+const data =
+await res
+.json()
+.catch(
+() => null
+);
+
+if (
+!res.ok ||
+(
+data &&
+data.error
+)
+) {
+
+```
+throw new Error(
+  data &&
+  data.error
+    ? data.error
+    : 'Sheet delete failed'
+);
+```
+
+}
+}
+
+// ---------- Sheet connection ----------
+
+document
+.getElementById(
+'syncBtn'
+)
+.addEventListener(
+'click',
+() => {
+
+```
+  document.getElementById(
+    'sheetUrlInput'
+  ).value =
+    SHEET_URL;
+
+  document.getElementById(
+    'sheetModal'
+  ).classList.remove(
+    'hidden'
   );
 }
+```
+
+);
+
+document
+.getElementById(
+'sheetModalClose'
+)
+.addEventListener(
+'click',
+() => {
+
+```
+  document.getElementById(
+    'sheetModal'
+  ).classList.add(
+    'hidden'
+  );
+}
+```
+
+);
+
+document
+.getElementById(
+'sheetModalCancel'
+)
+.addEventListener(
+'click',
+() => {
+
+```
+  document.getElementById(
+    'sheetModal'
+  ).classList.add(
+    'hidden'
+  );
+}
+```
+
+);
+
+document
+.getElementById(
+'sheetModalSave'
+)
+.addEventListener(
+'click',
+() => {
+
+```
+  SHEET_URL =
+    document.getElementById(
+      'sheetUrlInput'
+    ).value.trim();
+
+  localStorage.setItem(
+    'gateops_sheet_url',
+    SHEET_URL
+  );
+
+  document.getElementById(
+    'sheetModal'
+  ).classList.add(
+    'hidden'
+  );
+
+  loadFromSheet();
+}
+```
+
+);
 
 // ---------- Clock ----------
 
 function tickClock() {
-  document.getElementById(
-    'clock'
-  ).textContent =
-    new Date().toLocaleTimeString(
-      [],
-      {
-        hour12: false
-      }
-    );
+
+document.getElementById(
+'clock'
+).textContent =
+new Date().toLocaleTimeString(
+[],
+{
+hour12: false
+}
+);
 }
 
 setInterval(
-  tickClock,
-  1000
+tickClock,
+1000
 );
 
 // ---------- Init ----------
 
 function init() {
-  populateAirlineOptions();
-  populateGateDatalist();
-  tickClock();
 
-  // Automatically connect to the permanent sheet.
-  loadFromSheet();
+populateAirlineOptions();
 
-  // Refresh conflict detection every minute.
-  setInterval(
-    renderBoard,
-    60000
+populateGateDatalist();
+
+tickClock();
+
+if (SHEET_URL) {
+
+```
+setSyncStatus(
+  'offline',
+  '● Connecting…'
+);
+
+loadFromSheet();
+```
+
+} else {
+
+```
+FLIGHTS =
+  CONFIG.SAMPLE_FLIGHTS.map(
+    f => ({
+      ...f
+    })
   );
+
+setSyncStatus(
+  'offline',
+  '● Local sample data (not synced)'
+);
+
+renderBoard();
+```
+
+}
+
+setInterval(
+renderBoard,
+60000
+);
 }
 
 init();
