@@ -5,7 +5,7 @@ GATE OPS BOARD — APP LOGIC
 // ---------- State ----------
 
 let FLIGHTS = [];
-let SHEET_URL = localStorage.getItem('gateops_sheet_url') || '';
+const SHEET_URL = 'https://script.google.com/macros/s/AKfycby9XfQI4dPTTHNPAoxeVWm0RLUMSeg6dl-H6iOOhPGAkjHODmseogl9h5RAxcRfYst6aA/exec';
 let searchTerm = '';
 let statusFilterVal = 'all';
 
