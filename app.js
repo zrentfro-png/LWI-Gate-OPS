@@ -581,6 +581,7 @@ function renderFlightCard(
     ></div>
   `;
 
+
   // ---------- Click ----------
 
   card.addEventListener(
@@ -607,7 +608,6 @@ function renderFlightCard(
     'dragstart',
     e => {
 
-      // Save the exact original values.
       ACTIVE_DRAG = {
         flightId: flight.id,
         gate: flight.gate,
@@ -2006,7 +2006,9 @@ document
   );
 
 
-// ---------- Google Sheet sync ----------
+// ============================================================
+// GOOGLE SHEET SYNC
+// ============================================================
 
 function setSyncStatus(
   state,
@@ -2028,6 +2030,8 @@ function setSyncStatus(
     label;
 }
 
+
+// ---------- Load flights from sheet ----------
 
 async function loadFromSheet() {
 
@@ -2102,6 +2106,8 @@ async function loadFromSheet() {
 }
 
 
+// ---------- Convert sheet row to flight ----------
+
 function rowToFlight(row) {
   return {
     id:
@@ -2109,33 +2115,37 @@ function rowToFlight(row) {
       row['FLIGHT NUMBER'],
 
     airline:
-      row['AIRLINE'],
+      row['AIRLINE'] || '',
 
     flightNumber:
-      row['FLIGHT NUMBER'],
+      row['FLIGHT NUMBER'] || '',
 
     to:
-      row['TO:'],
+      row['TO:'] || '',
 
     gate:
-      row['GATE:'],
+      row['GATE:'] || '',
 
     boarding:
-      row['BOARDING TIME:'],
+      row['BOARDING TIME:'] || '',
 
     departure:
-      row['DEPARTURE TIME:'],
+      row['DEPARTURE TIME:'] || '',
 
     status:
       row['STATUS:'] ||
+      row['STATUS'] ||
       'ON TIME',
 
     comments:
+      row['COMMENTS:'] ||
       row['COMMENTS'] ||
       ''
   };
 }
 
+
+// ---------- Convert flight to sheet row ----------
 
 function flightToRow(flight) {
   return {
@@ -2169,6 +2179,14 @@ function flightToRow(flight) {
 }
 
 
+// ============================================================
+// SAVE FLIGHT TO GOOGLE SHEET
+//
+// IMPORTANT:
+// Uses POST instead of GET for upsert/delete.
+// Your Code.gs already has doPost() handlers.
+// ============================================================
+
 async function pushFlightToSheet(
   flight
 ) {
@@ -2181,20 +2199,44 @@ async function pushFlightToSheet(
     '● Saving…'
   );
 
-  const params =
-    new URLSearchParams({
-      action: 'upsert',
-      row: JSON.stringify(
-        flightToRow(flight)
-      )
-    });
+  const payload = {
+    action: 'upsert',
+    row: flightToRow(flight)
+  };
 
-  const res =
-    await fetch(
-      SHEET_URL +
-      '?' +
-      params.toString()
+  let res;
+
+  try {
+
+    res =
+      await fetch(
+        SHEET_URL,
+        {
+          method: 'POST',
+
+          // text/plain avoids the browser sending
+          // an OPTIONS preflight request.
+          headers: {
+            'Content-Type':
+              'text/plain;charset=utf-8'
+          },
+
+          body:
+            JSON.stringify(payload)
+        }
+      );
+
+  } catch (err) {
+
+    console.error(
+      'Google Sheet POST request failed:',
+      err
     );
+
+    throw new Error(
+      'Could not connect to the Google Sheet.'
+    );
+  }
 
   if (!res.ok) {
     throw new Error(
@@ -2202,12 +2244,16 @@ async function pushFlightToSheet(
     );
   }
 
-  const data =
-    await res
-      .json()
-      .catch(
-        () => null
-      );
+  let data = null;
+
+  try {
+    data =
+      await res.json();
+  } catch (err) {
+    throw new Error(
+      'Google Sheet returned an invalid response.'
+    );
+  }
 
   if (
     data &&
@@ -2218,12 +2264,27 @@ async function pushFlightToSheet(
     );
   }
 
+  if (
+    !data ||
+    data.ok !== true
+  ) {
+    throw new Error(
+      'Google Sheet did not confirm the save.'
+    );
+  }
+
   setSyncStatus(
     'online',
     `● Synced with sheet (${new Date().toLocaleTimeString()})`
   );
+
+  return data;
 }
 
+
+// ============================================================
+// DELETE FLIGHT FROM GOOGLE SHEET
+// ============================================================
 
 async function deleteFlightFromSheet(
   id
@@ -2237,18 +2298,42 @@ async function deleteFlightFromSheet(
     '● Saving…'
   );
 
-  const params =
-    new URLSearchParams({
-      action: 'delete',
-      id
-    });
+  const payload = {
+    action: 'delete',
+    id: id
+  };
 
-  const res =
-    await fetch(
-      SHEET_URL +
-      '?' +
-      params.toString()
+  let res;
+
+  try {
+
+    res =
+      await fetch(
+        SHEET_URL,
+        {
+          method: 'POST',
+
+          headers: {
+            'Content-Type':
+              'text/plain;charset=utf-8'
+          },
+
+          body:
+            JSON.stringify(payload)
+        }
+      );
+
+  } catch (err) {
+
+    console.error(
+      'Google Sheet delete request failed:',
+      err
     );
+
+    throw new Error(
+      'Could not connect to the Google Sheet.'
+    );
+  }
 
   if (!res.ok) {
     throw new Error(
@@ -2256,12 +2341,16 @@ async function deleteFlightFromSheet(
     );
   }
 
-  const data =
-    await res
-      .json()
-      .catch(
-        () => null
-      );
+  let data = null;
+
+  try {
+    data =
+      await res.json();
+  } catch (err) {
+    throw new Error(
+      'Google Sheet returned an invalid response.'
+    );
+  }
 
   if (
     data &&
@@ -2272,10 +2361,21 @@ async function deleteFlightFromSheet(
     );
   }
 
+  if (
+    !data ||
+    data.ok !== true
+  ) {
+    throw new Error(
+      'Google Sheet did not confirm the deletion.'
+    );
+  }
+
   setSyncStatus(
     'online',
     `● Synced with sheet (${new Date().toLocaleTimeString()})`
   );
+
+  return data;
 }
 
 
