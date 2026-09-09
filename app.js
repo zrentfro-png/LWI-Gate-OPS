@@ -15,6 +15,9 @@ let randomEventTimer = null;
 let syncQueue = new Map();
 let syncTimer = null;
 let unreadEventCount = 0;
+let nextRandomEventAt = null;
+let persistTimer = null;
+const OPS_STATE_STORAGE_KEY = 'gateops_operational_state_v1';
 
 const EVENT_ACTIVITY_TYPES = new Set(['DELAY','CANCEL','DIVERT','WEATHER','GROUNDSTOP','AIRLINE','GATE','CREW','NEW','CONFLICT','AUTOSOLVE']);
 
@@ -26,6 +29,117 @@ function getOperationalDayKey() {
   const effective = new Date(now);
   if (now.getHours() < boundary) effective.setDate(effective.getDate() - 1);
   return effective.toDateString();
+}
+
+function serializeGroundStop(gs) {
+  if (!gs) return null;
+  return {
+    ...gs,
+    applied: gs.applied instanceof Set ? [...gs.applied] : (Array.isArray(gs.applied) ? gs.applied : []),
+  };
+}
+
+function saveOperationalStateNow() {
+  try {
+    const state = {
+      version: 1,
+      operationalDayKey,
+      savedAt: Date.now(),
+      weather: WEATHER,
+      weatherLastHourKey: WEATHER_LAST_HOUR_KEY,
+      groundStop: serializeGroundStop(GROUND_STOP),
+      history: HISTORY.map(h => ({ ...h, time: h.time instanceof Date ? h.time.toISOString() : h.time })),
+      unreadEventCount,
+      nextRandomEventAt,
+      flights: FLIGHTS.map(f => ({
+        id: f.id,
+        ops: f.ops ? { ...f.ops } : null,
+        gate: f.gate,
+        boarding: f.boarding,
+        departure: f.departure,
+        status: f.status,
+        comments: f.comments,
+        delayTag: f.delayTag || '',
+        gateStart: f.gateStart || '',
+        airline: f.airline,
+        flightNumber: f.flightNumber,
+        to: f.to,
+        base: f.base || null,
+      })),
+    };
+    localStorage.setItem(OPS_STATE_STORAGE_KEY, JSON.stringify(state));
+  } catch (err) {
+    console.warn('Could not persist Gate Ops state:', err);
+  }
+}
+
+function persistOperationalState() {
+  clearTimeout(persistTimer);
+  persistTimer = setTimeout(saveOperationalStateNow, 150);
+}
+
+function clearPersistedOperationalState() {
+  clearTimeout(persistTimer);
+  try { localStorage.removeItem(OPS_STATE_STORAGE_KEY); } catch (_) {}
+}
+
+function restoreOperationalState() {
+  let raw;
+  try { raw = localStorage.getItem(OPS_STATE_STORAGE_KEY); } catch (_) { return false; }
+  if (!raw) return false;
+
+  let saved;
+  try { saved = JSON.parse(raw); } catch (_) { clearPersistedOperationalState(); return false; }
+  if (!saved || saved.operationalDayKey !== operationalDayKey) {
+    clearPersistedOperationalState();
+    return false;
+  }
+
+  WEATHER = saved.weather || 'CLEAR';
+  WEATHER_LAST_HOUR_KEY = saved.weatherLastHourKey || null;
+  GROUND_STOP = saved.groundStop ? { ...saved.groundStop, applied: new Set(saved.groundStop.applied || []) } : null;
+  HISTORY = Array.isArray(saved.history) ? saved.history.map(h => ({ ...h, time: new Date(h.time) })) : [];
+  unreadEventCount = Number(saved.unreadEventCount) || 0;
+  nextRandomEventAt = Number(saved.nextRandomEventAt) || null;
+
+  const savedById = new Map((saved.flights || []).map(f => [String(f.id), f]));
+  const liveIds = new Set(FLIGHTS.map(f => String(f.id)));
+
+  // Reattach today's in-browser operational state to the authoritative
+  // live rows loaded from the Sheet.
+  FLIGHTS.forEach(f => {
+    const sf = savedById.get(String(f.id));
+    if (!sf) return;
+    f.ops = sf.ops ? { ...sf.ops } : null;
+  });
+
+  // If a random/new flight existed locally but its Sheet write had not
+  // completed before the refresh, keep it instead of losing the event.
+  for (const sf of saved.flights || []) {
+    if (liveIds.has(String(sf.id))) continue;
+    FLIGHTS.push({
+      id: sf.id,
+      airline: sf.airline || '',
+      flightNumber: sf.flightNumber || '',
+      to: sf.to || '',
+      gate: sf.gate || '',
+      boarding: sf.boarding || '',
+      departure: sf.departure || '',
+      status: sf.status || 'ON TIME',
+      comments: sf.comments || '',
+      delayTag: sf.delayTag || '',
+      gateStart: sf.gateStart || '',
+      base: sf.base || null,
+      ops: sf.ops ? { ...sf.ops } : null,
+    });
+  }
+
+  const w = document.getElementById('weatherSelect');
+  if (w) w.value = WEATHER;
+  updateGroundStopStatus();
+  updateActivityBadge();
+  updateEventsBadge();
+  return true;
 }
 
 function ensureOps(flight) {
@@ -60,6 +174,7 @@ function logActivity(text, type = 'INFO', flightId = null, action = null) {
   renderEventsPanel();
   updateActivityBadge();
   updateEventsBadge();
+  persistOperationalState();
 }
 
 function pendingApprovalCount() {
@@ -926,13 +1041,26 @@ function createRandomFlight() {
   FLIGHTS.push(flight); logActivity(`Random new flight: ${flight.flightNumber} → ${flight.to}, gate ${flight.gate}`, 'NEW', id); queueFlightSync(flight);
 }
 
-function scheduleNextRandomEvent() {
+function scheduleNextRandomEvent(resumeSaved = false) {
   clearTimeout(randomEventTimer);
-  let min = CONFIG.RANDOM_EVENT_MIN_SECONDS || 25, max = CONFIG.RANDOM_EVENT_MAX_SECONDS || 110;
-  if (WEATHER === 'STORM') { min = CONFIG.STORM_EVENT_MIN_SECONDS || 15; max = CONFIG.STORM_EVENT_MAX_SECONDS || 55; }
-  else if (WEATHER === 'WINDY') { min = CONFIG.WINDY_EVENT_MIN_SECONDS || 20; max = CONFIG.WINDY_EVENT_MAX_SECONDS || 80; }
-  const delay = (min + Math.random() * (max - min)) * 1000;
-  randomEventTimer = setTimeout(spawnRandomEvent, delay);
+  let delay;
+
+  if (resumeSaved && nextRandomEventAt && nextRandomEventAt > Date.now()) {
+    delay = nextRandomEventAt - Date.now();
+  } else {
+    let min = CONFIG.RANDOM_EVENT_MIN_SECONDS || 25, max = CONFIG.RANDOM_EVENT_MAX_SECONDS || 110;
+    if (WEATHER === 'STORM') { min = CONFIG.STORM_EVENT_MIN_SECONDS || 15; max = CONFIG.STORM_EVENT_MAX_SECONDS || 55; }
+    else if (WEATHER === 'WINDY') { min = CONFIG.WINDY_EVENT_MIN_SECONDS || 20; max = CONFIG.WINDY_EVENT_MAX_SECONDS || 80; }
+    delay = (min + Math.random() * (max - min)) * 1000;
+    nextRandomEventAt = Date.now() + delay;
+  }
+
+  persistOperationalState();
+  randomEventTimer = setTimeout(() => {
+    nextRandomEventAt = null;
+    persistOperationalState();
+    spawnRandomEvent();
+  }, Math.max(250, delay));
 }
 
 function collectCarryovers() {
@@ -950,7 +1078,9 @@ function collectCarryovers() {
 }
 
 async function resetSimulation(reason, preserveCarryovers) {
-  WEATHER = 'CLEAR'; WEATHER_LAST_HOUR_KEY = null; GROUND_STOP = null;
+  clearPersistedOperationalState();
+  WEATHER = 'CLEAR'; WEATHER_LAST_HOUR_KEY = null; GROUND_STOP = null; nextRandomEventAt = null;
+  HISTORY = []; unreadEventCount = 0;
   document.getElementById('weatherSelect').value = 'CLEAR'; updateGroundStopStatus();
   const carryovers = preserveCarryovers ? collectCarryovers() : [];
   logActivity(`— Simulation reset (${reason})${carryovers.length ? `; ${carryovers.length} carryover flight(s)` : ''} —`, 'RESET');
@@ -959,7 +1089,7 @@ async function resetSimulation(reason, preserveCarryovers) {
     const params = new URLSearchParams({ action: 'reset', carryovers: JSON.stringify(carryovers) });
     const data = await fetchSheetJson(SHEET_URL + '?' + params.toString());
     if (data.error) throw new Error(data.error || 'Reset failed');
-    FLIGHTS = (data.rows || []).map(rowToFlight); renderBoard();
+    FLIGHTS = (data.rows || []).map(rowToFlight); renderBoard(); persistOperationalState(); scheduleNextRandomEvent();
   } catch (e) { console.error(e); alert('Could not reset the live sheet to the baseline schedule.'); }
 }
 
@@ -1039,11 +1169,18 @@ async function loadFromSheet() {
   try {
     const data = await fetchSheetJson(SHEET_URL + '?action=list&_=' + Date.now());
     if (data.error || !Array.isArray(data)) throw new Error(data.error || 'Load failed');
-    FLIGHTS = data.map(rowToFlight); setSyncStatus('online', `● Synced (${new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',hour12:true})})`); renderBoard();
+    FLIGHTS = data.map(rowToFlight);
+    const restored = restoreOperationalState();
+    setSyncStatus('online', `● Synced (${new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',hour12:true})})${restored ? ' · game restored' : ''}`);
+    renderBoard();
+    renderHistoryPanel();
+    renderEventsPanel();
+    scheduleNextRandomEvent(true);
   } catch (e) { console.error(e); setSyncStatus('error', `● Sheet failed: ${e.message}`); }
 }
 
 function queueFlightSync(flight) {
+  persistOperationalState();
   if (!SHEET_URL) return;
   syncQueue.set(flight.id, flightToRow(flight));
   clearTimeout(syncTimer); syncTimer = setTimeout(flushSyncQueue, 500);
@@ -1091,11 +1228,20 @@ function tickClock() { document.getElementById('clock').textContent = new Date()
 
 function init() {
   populateAirlineOptions(); populateGateDatalist(); tickClock();
-  if (SHEET_URL) loadFromSheet(); else { FLIGHTS = CONFIG.SAMPLE_FLIGHTS.map(f => ({...f})); setSyncStatus('offline', '● Local sample data'); renderBoard(); }
+  if (SHEET_URL) {
+    loadFromSheet();
+  } else {
+    FLIGHTS = CONFIG.SAMPLE_FLIGHTS.map(f => ({...f}));
+    restoreOperationalState();
+    setSyncStatus('offline', '● Local sample data');
+    renderBoard();
+    scheduleNextRandomEvent(true);
+  }
   setInterval(tickClock, 1000);
-  setInterval(() => { processRequiredApprovals(); processWeatherHour(); checkDailyReset(); updateGroundStopStatus(); }, 15000);
+  setInterval(() => { processRequiredApprovals(); processWeatherHour(); checkDailyReset(); updateGroundStopStatus(); persistOperationalState(); }, 15000);
   setInterval(renderBoard, 60000);
-  scheduleNextRandomEvent();
+  window.addEventListener('beforeunload', saveOperationalStateNow);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveOperationalStateNow(); });
 }
 
 init();
