@@ -109,6 +109,11 @@ function minutesToClockString(mins) {
   return `${h12}:${mm} ${ampm}`;
 }
 
+function displayClockTime(raw) {
+  const mins = timeToMinutes(raw);
+  return mins === null ? (raw || '') : minutesToClockString(mins);
+}
+
 function parseTimelineBoundary(raw, fallback) {
   if (!raw) return fallback;
   const match = String(raw).trim().match(/^(\d{1,2}):(\d{2})$/);
@@ -275,7 +280,7 @@ function renderFlightCard(flight, isConflict) {
 
   card.innerHTML = `
     <div class="fc-top"><span class="fc-flightnum">${escapeHtml(flight.flightNumber)}</span><span class="fc-to">→ ${escapeHtml(flight.to)}</span></div>
-    <div class="fc-times"><span>Board ${escapeHtml(flight.boarding)}</span><span>Dep ${escapeHtml(flight.departure)}</span></div>
+    <div class="fc-times"><span>Board ${escapeHtml(displayClockTime(flight.boarding))}</span><span>Dep ${escapeHtml(displayClockTime(flight.departure))}</span></div>
     <div class="fc-status-line"><span class="fc-status-pill ${isConflict ? 'pill-conflict' : statusPillClass(flight.status)}">${isConflict ? 'CONFLICT' : escapeHtml(flight.status)}</span>${flight.delayTag ? `<span class="fc-tag">${escapeHtml(flight.delayTag)}</span>` : ''}</div>
     ${flight.comments ? `<div class="fc-comment">${escapeHtml(flight.comments)}</div>` : ''}
     ${isConflict ? `<div class="fc-conflict-note">Gate overlap — click for minimal-change fixes</div>` : ''}
@@ -346,7 +351,14 @@ function renderBoard() {
       const gateId = document.createElement('div'); gateId.className = 'gate-id-cell'; gateId.textContent = gate.id;
       const track = document.createElement('div'); track.className = 'gate-track'; track.style.width = TIMELINE_WIDTH + 'px'; track.style.backgroundSize = `${COL_WIDTH}px 100%`; track.dataset.gateId = gate.id; track.dataset.airline = gate.airline;
 
-      FLIGHTS.filter(f => f.gate === gate.id && flightMatchesFilters(f)).forEach(f => {
+      const flightsHere = FLIGHTS.filter(f => f.gate === gate.id && flightMatchesFilters(f));
+      const rowNeedsExtraHeight = flightsHere.some(f => {
+        const o = ensureOps(f);
+        return (o.taxiRequested && !o.taxiApproved) || (o.pushbackRequested && !o.pushbackApproved) || conflicts.has(f.id);
+      });
+      if (rowNeedsExtraHeight) row.classList.add('timeline-row-expanded');
+
+      flightsHere.forEach(f => {
         const win = occupancyWindow(f); const card = renderFlightCard(f, conflicts.has(f.id));
         if (win) {
           const left = Math.max(0, minutesToX(win.start));
@@ -519,12 +531,42 @@ document.querySelectorAll('#quickActions button[data-action]').forEach(btn => bt
 function applyDelay(flight, minutes, tag, reason, moveStart = false) {
   if (!flight || isDeparted(flight) || flight.status === 'CANCELLED' || flight.status === 'DIVERTED') return false;
   const dep = toTimelineMinutes(flight.departure); if (dep === null) return false;
-  const oldDep = dep; flight.departure = minutesToClockString(dep + minutes); flight.status = 'DELAYED'; flight.delayTag = tag || 'DELAY';
+  const conflictsBefore = computeConflicts();
+  const oldDep = dep;
+
+  // Normal delays keep the original gate-occupancy start and extend the
+  // right edge of the block. Only true late-arriving-aircraft events may
+  // move the start later.
+  if (!flight.gateStart) {
+    const start = gateStartMinutes(flight);
+    if (start !== null) flight.gateStart = minutesToClockString(start);
+  }
+
+  flight.departure = minutesToClockString(dep + minutes);
+  flight.status = 'DELAYED';
+  flight.delayTag = tag || 'DELAY';
+
   if (moveStart) {
     const start = gateStartMinutes(flight); if (start !== null) flight.gateStart = minutesToClockString(start + minutes);
     const board = toTimelineMinutes(flight.boarding); if (board !== null) flight.boarding = minutesToClockString(board + minutes);
   }
+
   logActivity(`${flight.flightNumber} delayed +${minutes}m (${reason || tag || 'delay'})`, 'DELAY', flight.id);
+
+  const conflictsAfter = computeConflicts();
+  if (!conflictsBefore.has(flight.id) && conflictsAfter.has(flight.id)) {
+    const other = FLIGHTS.find(f => f.id === conflictsAfter.get(flight.id));
+    logActivity(`CONFLICT: ${flight.flightNumber}'s extended gate block now overlaps ${other ? other.flightNumber : 'another aircraft'} at ${flight.gate}`, 'CONFLICT', flight.id);
+  } else {
+    // The delayed flight can also be the earlier aircraft causing the later
+    // flight to become conflicted, so surface those newly-created conflicts too.
+    for (const [conflictedId, blockerId] of conflictsAfter.entries()) {
+      if (blockerId !== flight.id || conflictsBefore.has(conflictedId)) continue;
+      const later = FLIGHTS.find(f => f.id === conflictedId);
+      if (later) logActivity(`CONFLICT: ${flight.flightNumber}'s extended gate block now overlaps ${later.flightNumber} at ${flight.gate}`, 'CONFLICT', later.id);
+    }
+  }
+
   queueFlightSync(flight);
   return oldDep !== toTimelineMinutes(flight.departure);
 }
@@ -558,7 +600,7 @@ function processRequiredApprovals() {
     }
 
     if (ops.taxiRequested && !ops.taxiApproved && nowMs >= ops.taxiPenaltyAt) {
-      if (applyDelay(f, CONFIG.APPROVAL_DELAY_STEP_MINUTES || 5, 'LATE ARRIVING AIRCRAFT', 'taxi approval not granted', true)) changed = true;
+      if (applyDelay(f, CONFIG.APPROVAL_DELAY_STEP_MINUTES || 5, 'DELAY', 'taxi approval not granted — gate remains reserved', false)) changed = true;
       ops.taxiPenaltyAt = nowMs + (CONFIG.APPROVAL_GRACE_MINUTES || 5) * 60000;
     }
 
