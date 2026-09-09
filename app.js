@@ -461,49 +461,114 @@ function suggestResolutionsFor(flight) {
 }
 
 
+function getConflictPairs() {
+  const pairs = [];
+  const byGate = {};
+
+  FLIGHTS.forEach(f => {
+    if (f.status === 'CANCELLED' || f.status === 'DIVERTED' || isDeparted(f)) return;
+    if (!occupancyWindow(f)) return;
+    (byGate[f.gate] ||= []).push(f);
+  });
+
+  Object.values(byGate).forEach(list => {
+    list.sort((a, b) => (gateStartMinutes(a) ?? Infinity) - (gateStartMinutes(b) ?? Infinity));
+    for (let i = 0; i < list.length; i++) {
+      const aw = occupancyWindow(list[i]);
+      if (!aw) continue;
+      for (let j = i + 1; j < list.length; j++) {
+        if (String(list[i].id) === String(list[j].id)) continue;
+        const bw = occupancyWindow(list[j]);
+        if (!bw) continue;
+        if (bw.start >= aw.end) break;
+        if (windowsOverlap(aw, bw)) pairs.push([list[i], list[j]]);
+      }
+    }
+  });
+
+  return pairs;
+}
+
+function buildConflictComponents(pairs) {
+  const graph = new Map();
+  for (const [a, b] of pairs) {
+    if (!graph.has(a.id)) graph.set(a.id, new Set());
+    if (!graph.has(b.id)) graph.set(b.id, new Set());
+    graph.get(a.id).add(b.id);
+    graph.get(b.id).add(a.id);
+  }
+
+  const components = [];
+  const seen = new Set();
+  for (const id of graph.keys()) {
+    if (seen.has(id)) continue;
+    const stack = [id];
+    const ids = [];
+    seen.add(id);
+    while (stack.length) {
+      const cur = stack.pop();
+      ids.push(cur);
+      for (const next of graph.get(cur) || []) {
+        if (seen.has(next)) continue;
+        seen.add(next);
+        stack.push(next);
+      }
+    }
+    components.push(ids);
+  }
+  return components;
+}
+
 function autoSolveSchedule() {
-  const movable = FLIGHTS.filter(f =>
-    f.status !== 'CANCELLED' &&
-    f.status !== 'DIVERTED' &&
-    !isDeparted(f) &&
-    occupancyWindow(f)
-  );
+  const initialPairs = getConflictPairs();
+  if (!initialPairs.length) return { moved: 0, remaining: 0, affected: 0 };
 
-  if (!movable.length) return { moved: 0, remaining: computeConflicts().size };
-
-  // Build one availability calendar per gate. Departed flights are ignored;
-  // active/movable flights are rescheduled from scratch so the solver can
-  // actually untangle dense banks instead of making one overlap worse.
-  const gateBookings = new Map(GATE_LIST.map(g => [g.id, []]));
+  // Critical rule: ONLY flights that are actually involved in a conflict may
+  // be rescheduled. Every unrelated flight becomes a fixed reservation. This
+  // prevents a 2 PM problem from cascading into clean midnight/3 AM flights.
+  const affectedIds = new Set();
+  initialPairs.forEach(([a, b]) => { affectedIds.add(a.id); affectedIds.add(b.id); });
 
   const original = new Map();
-  movable.forEach(f => {
+  for (const f of FLIGHTS) {
     const w = occupancyWindow(f);
+    if (!w) continue;
     original.set(f.id, {
       gate: f.gate,
       start: w.start,
       end: w.end,
       duration: Math.max(INTERVAL_MIN, w.end - w.start),
       departure: f.departure,
+      boarding: f.boarding,
       gateStart: f.gateStart,
     });
+  }
+
+  const gateBookings = new Map(GATE_LIST.map(g => [g.id, []]));
+
+  function addBooking(gate, start, end, flightId) {
+    if (!gateBookings.has(gate)) gateBookings.set(gate, []);
+    gateBookings.get(gate).push({ start, end, flightId });
+  }
+
+  // All unrelated active flights are immovable obstacles. Departed/cancelled/
+  // diverted flights are not part of current gate occupancy.
+  FLIGHTS.forEach(f => {
+    if (affectedIds.has(f.id)) return;
+    if (f.status === 'CANCELLED' || f.status === 'DIVERTED' || isDeparted(f)) return;
+    const w = occupancyWindow(f);
+    if (w) addBooking(f.gate, w.start, w.end, f.id);
   });
 
-  // Earlier flights get first choice. This keeps the schedule stable and
-  // pushes congestion later instead of wildly rearranging the whole day.
-  movable.sort((a, b) => {
-    const aw = original.get(a.id), bw = original.get(b.id);
-    return (aw?.start ?? Infinity) - (bw?.start ?? Infinity);
-  });
-
+  const components = buildConflictComponents(initialPairs);
   const placements = new Map();
-  const searchEnd = TIMELINE_END_MIN; // 5:00 AM next day with current config
+  const searchEnd = TIMELINE_END_MIN;
 
   function earliestSlot(bookings, desiredStart, duration) {
     let candidate = Math.max(desiredStart, nowTimelineMinutes());
     candidate = Math.ceil(candidate / INTERVAL_MIN) * INTERVAL_MIN;
-
     const sorted = [...bookings].sort((a, b) => a.start - b.start);
+
     for (const b of sorted) {
       if (candidate + duration <= b.start) break;
       if (candidate < b.end && candidate + duration > b.start) {
@@ -513,54 +578,78 @@ function autoSolveSchedule() {
     return candidate;
   }
 
-  for (const flight of movable) {
+  function gateScore(gate, currentGate, delay, wrongAirline) {
+    const sameGatePenalty = gate.id === currentGate?.id ? 0 : 15;
+    const concoursePenalty = currentGate && gate.concourse !== currentGate.concourse ? 120 : 0;
+    const distance = currentGate && gate.concourse === currentGate.concourse ? Math.abs(gate.num - currentGate.num) * 3 : 0;
+    const airlinePenalty = wrongAirline ? 50000 : 0;
+    return delay * 100 + sameGatePenalty + concoursePenalty + distance + airlinePenalty;
+  }
+
+  function findBestPlacement(flight) {
     const o = original.get(flight.id);
-    const compatible = GATE_LIST.filter(g => airlinesMatch(g.airline, effectiveAirline(flight)));
+    if (!o) return null;
     const currentGate = GATE_BY_ID[o.gate];
+    const ownGates = GATE_LIST.filter(g => airlinesMatch(g.airline, effectiveAirline(flight)));
+    const otherGates = GATE_LIST.filter(g => !ownGates.some(own => own.id === g.id));
     let best = null;
 
-    for (const gate of compatible) {
-      const bookings = gateBookings.get(gate.id) || [];
-      const start = earliestSlot(bookings, o.start, o.duration);
-      const end = start + o.duration;
-      if (end > searchEnd) continue;
-
-      const delay = Math.max(0, end - o.end);
-      const gateDistance = currentGate ? Math.abs(gate.num - currentGate.num) : 0;
-      const concoursePenalty = currentGate && gate.concourse !== currentGate.concourse ? 120 : 0;
-      const gateChangePenalty = gate.id === o.gate ? 0 : 10;
-      const score = delay * 100 + concoursePenalty + gateDistance * 2 + gateChangePenalty;
-
-      if (!best || score < best.score) best = { gate: gate.id, start, end, delay, score };
-    }
-
-    // If the airline's own gates are completely saturated, fall back to ANY
-    // physical gate. The user explicitly asked the one-click solver to make
-    // everything fit; wrong-airline placement is preferable to leaving 100+
-    // unresolved conflicts. Those moves remain visually flagged.
-    if (!best) {
-      for (const gate of GATE_LIST) {
-        const bookings = gateBookings.get(gate.id) || [];
-        const start = earliestSlot(bookings, o.start, o.duration);
+    const consider = (gates, wrongAirline) => {
+      for (const gate of gates) {
+        const start = earliestSlot(gateBookings.get(gate.id) || [], o.start, o.duration);
         const end = start + o.duration;
         if (end > searchEnd) continue;
         const delay = Math.max(0, end - o.end);
-        const gateDistance = currentGate && gate.concourse === currentGate.concourse ? Math.abs(gate.num - currentGate.num) : 50;
-        const score = delay * 100 + 10000 + gateDistance;
+        const score = gateScore(gate, currentGate, delay, wrongAirline);
         if (!best || score < best.score) best = { gate: gate.id, start, end, delay, score };
       }
+    };
+
+    consider(ownGates, false);
+    if (!best) consider(otherGates, true);
+    return best;
+  }
+
+  for (const componentIds of components) {
+    const componentFlights = componentIds
+      .map(id => FLIGHTS.find(f => f.id === id))
+      .filter(Boolean)
+      .sort((a, b) => (original.get(a.id)?.start ?? Infinity) - (original.get(b.id)?.start ?? Infinity));
+
+    if (!componentFlights.length) continue;
+
+    // Preserve one flight in each conflict chain whenever possible. Keeping an
+    // anchor means a two-flight conflict normally delays ONE aircraft, not both.
+    // Prefer the earliest-starting flight as the stable anchor.
+    const anchor = componentFlights[0];
+    const anchorOrig = original.get(anchor.id);
+    if (anchorOrig) {
+      placements.set(anchor.id, { gate: anchorOrig.gate, start: anchorOrig.start, end: anchorOrig.end, delay: 0, anchor: true });
+      addBooking(anchorOrig.gate, anchorOrig.start, anchorOrig.end, anchor.id);
     }
 
-    if (!best) continue;
-    placements.set(flight.id, best);
-    gateBookings.get(best.gate).push({ start: best.start, end: best.end, flightId: flight.id });
+    // Only the remaining members of this actual conflict chain are candidates
+    // for movement. Clean flights elsewhere in the day never enter this loop.
+    for (const flight of componentFlights.slice(1)) {
+      const best = findBestPlacement(flight);
+      if (!best) {
+        // If the chosen anchor made this chain impossible, allow this flight to
+        // remain unresolved rather than cascading changes into unrelated flights.
+        const o = original.get(flight.id);
+        if (o) addBooking(o.gate, o.start, o.end, flight.id);
+        continue;
+      }
+      placements.set(flight.id, best);
+      addBooking(best.gate, best.start, best.end, flight.id);
+    }
   }
 
   let moved = 0;
-  for (const flight of movable) {
+  for (const flight of FLIGHTS) {
+    if (!affectedIds.has(flight.id)) continue;
     const place = placements.get(flight.id);
     const o = original.get(flight.id);
-    if (!place || !o) continue;
+    if (!place || !o || place.anchor) continue;
 
     const gateChanged = place.gate !== o.gate;
     const timeChanged = place.start !== o.start || place.end !== o.end;
@@ -570,9 +659,7 @@ function autoSolveSchedule() {
     flight.gateStart = minutesToClockString(place.start);
     flight.departure = minutesToClockString(place.end);
 
-    // Keep the boarding offset tied to the shifted occupancy window when
-    // possible, rather than leaving boarding behind at the old clock time.
-    const oldBoard = toTimelineMinutes(flight.boarding);
+    const oldBoard = toTimelineMinutes(o.boarding);
     if (oldBoard !== null) {
       const boardOffset = oldBoard - o.start;
       flight.boarding = minutesToClockString(place.start + Math.max(0, boardOffset));
@@ -588,7 +675,7 @@ function autoSolveSchedule() {
         'AUTOSOLVE',
         flight.id
       );
-    } else {
+    } else if (gateChanged) {
       logActivity(`AUTO SOLVE: ${flight.flightNumber} gate ${o.gate} → ${place.gate}`, 'AUTOSOLVE', flight.id);
     }
 
@@ -596,7 +683,7 @@ function autoSolveSchedule() {
     moved++;
   }
 
-  return { moved, remaining: computeConflicts().size };
+  return { moved, remaining: computeConflicts().size, affected: affectedIds.size };
 }
 
 function autoSolveAllConflicts() {
