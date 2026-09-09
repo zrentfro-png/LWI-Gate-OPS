@@ -630,31 +630,113 @@ function updateGroundStopStatus() {
   el.textContent = `Active until ${minutesToClockString(GROUND_STOP.end)}`;
 }
 
-function randomFutureFlight(maxAhead = 120) {
+function randomFutureFlight(maxAhead = 120, airline = null) {
   const now = nowTimelineMinutes();
   const c = FLIGHTS.filter(f => {
     const dep = toTimelineMinutes(f.departure);
-    return dep !== null && dep > now && dep <= now + maxAhead && !isDeparted(f) && f.status !== 'CANCELLED' && f.status !== 'DIVERTED';
+    return dep !== null && dep > now && dep <= now + maxAhead && !isDeparted(f) &&
+      f.status !== 'CANCELLED' && f.status !== 'DIVERTED' &&
+      (!airline || airlinesMatch(effectiveAirline(f), airline));
   });
   return c.length ? c[Math.floor(Math.random() * c.length)] : null;
 }
 
+function randomFutureFlights(maxAhead = 120, airline = null, limit = 4) {
+  const now = nowTimelineMinutes();
+  const c = FLIGHTS.filter(f => {
+    const dep = toTimelineMinutes(f.departure);
+    return dep !== null && dep > now && dep <= now + maxAhead && !isDeparted(f) &&
+      f.status !== 'CANCELLED' && f.status !== 'DIVERTED' &&
+      (!airline || airlinesMatch(effectiveAirline(f), airline));
+  });
+  for (let i = c.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [c[i], c[j]] = [c[j], c[i]];
+  }
+  return c.slice(0, limit);
+}
+
+function randomAirlineDisruption() {
+  const airlines = [...new Set(FLIGHTS.map(f => effectiveAirline(f)).filter(Boolean))];
+  if (!airlines.length) return false;
+  const airline = airlines[Math.floor(Math.random() * airlines.length)];
+  const affected = randomFutureFlights(150, airline, 2 + Math.floor(Math.random() * 4));
+  if (!affected.length) return false;
+  const causes = [
+    ['CREW HOLD', 'crew scheduling disruption'],
+    ['OTHER', 'airline systems slowdown'],
+    ['LATE ARRIVING AIRCRAFT', 'late inbound aircraft rotation'],
+    ['OTHER', 'maintenance coordination issue']
+  ];
+  const [tag, cause] = causes[Math.floor(Math.random() * causes.length)];
+  const baseDelay = [10, 15, 20, 25][Math.floor(Math.random() * 4)];
+  let count = 0;
+  affected.forEach((f, idx) => {
+    const extra = idx && Math.random() < .45 ? 5 : 0;
+    if (applyDelay(f, baseDelay + extra, tag, `${airline} ${cause}`)) count++;
+  });
+  if (count) logActivity(`${airline} disruption: ${cause}; ${count} flight${count === 1 ? '' : 's'} affected`, 'AIRLINE');
+  return count > 0;
+}
+
+function randomGateEvent() {
+  const f = randomFutureFlight(100);
+  if (!f) return false;
+  const reasons = ['jet bridge issue', 'ground power unit unavailable', 'baggage belt problem', 'gate equipment inspection'];
+  const reason = reasons[Math.floor(Math.random() * reasons.length)];
+  const delay = [5, 10, 15, 20][Math.floor(Math.random() * 4)];
+  const ok = applyDelay(f, delay, 'OTHER', reason);
+  if (ok) logActivity(`Gate event at ${f.gate}: ${reason} — ${f.flightNumber} +${delay}m`, 'GATE', f.id);
+  return ok;
+}
+
+function randomCrewEvent() {
+  const f = randomFutureFlight(120);
+  if (!f) return false;
+  const delay = [10, 15, 20, 30][Math.floor(Math.random() * 4)];
+  const ok = applyDelay(f, delay, 'CREW HOLD', 'crew connection / staffing hold');
+  if (ok) logActivity(`Crew hold: ${f.flightNumber} at ${f.gate} +${delay}m`, 'CREW', f.id);
+  return ok;
+}
+
 function spawnRandomEvent() {
   const r = Math.random();
-  if (r < 0.38) {
-    const f = randomFutureFlight(120); if (f) applyDelay(f, [5,10,15,20,30][Math.floor(Math.random()*5)], Math.random() < .25 ? 'CREW HOLD' : 'OTHER', 'random operational delay');
-  } else if (r < 0.52) {
-    const f = randomFutureFlight(90); if (f) { f.status = 'CANCELLED'; f.delayTag = 'OTHER'; logActivity(`Random event: ${f.flightNumber} cancelled`, 'CANCEL', f.id); queueFlightSync(f); }
-  } else if (r < 0.62) {
-    const f = randomFutureFlight(90); if (f) { f.status = 'DIVERTED'; f.delayTag = 'OTHER'; logActivity(`Random event: ${f.flightNumber} diverted`, 'DIVERT', f.id); queueFlightSync(f); }
-  } else if (r < 0.74) {
-    issueGroundStop([15,20,30,45,60][Math.floor(Math.random()*5)], 'random event');
-  } else if (r < 0.86) {
-    WEATHER = Math.random() < .7 ? 'STORM' : 'WINDY'; WEATHER_LAST_HOUR_KEY = null; document.getElementById('weatherSelect').value = WEATHER; logActivity(`Random weather event: ${WEATHER}`, 'WEATHER'); processWeatherHour();
+  let happened = false;
+
+  if (r < 0.24) {
+    const f = randomFutureFlight(120);
+    if (f) happened = applyDelay(f, [5,10,15,20,30][Math.floor(Math.random()*5)], Math.random() < .3 ? 'CREW HOLD' : 'OTHER', 'random operational delay');
+  } else if (r < 0.39) {
+    happened = randomAirlineDisruption();
+  } else if (r < 0.50) {
+    happened = randomGateEvent();
+  } else if (r < 0.59) {
+    happened = randomCrewEvent();
+  } else if (r < 0.66) {
+    const f = randomFutureFlight(90);
+    if (f) { f.status = 'CANCELLED'; f.delayTag = 'OTHER'; logActivity(`Random event: ${f.flightNumber} cancelled`, 'CANCEL', f.id); queueFlightSync(f); happened = true; }
+  } else if (r < 0.72) {
+    const f = randomFutureFlight(90);
+    if (f) { f.status = 'DIVERTED'; f.delayTag = 'OTHER'; logActivity(`Random event: ${f.flightNumber} diverted`, 'DIVERT', f.id); queueFlightSync(f); happened = true; }
+  } else if (r < 0.81) {
+    issueGroundStop([15,20,30,45,60][Math.floor(Math.random()*5)], 'random event'); happened = true;
+  } else if (r < 0.91) {
+    WEATHER = Math.random() < .72 ? 'STORM' : 'WINDY';
+    WEATHER_LAST_HOUR_KEY = null;
+    document.getElementById('weatherSelect').value = WEATHER;
+    logActivity(`Random weather event: ${WEATHER === 'STORM' ? 'THUNDERSTORM' : 'WINDY CONDITIONS'}`, 'WEATHER');
+    processWeatherHour(); happened = true;
   } else {
-    createRandomFlight();
+    createRandomFlight(); happened = true;
   }
-  renderBoard(); scheduleNextRandomEvent();
+
+  if (!happened) {
+    const f = randomFutureFlight(120);
+    if (f) applyDelay(f, 10, 'OTHER', 'minor operational hold');
+  }
+
+  renderBoard();
+  scheduleNextRandomEvent();
 }
 
 function createRandomFlight() {

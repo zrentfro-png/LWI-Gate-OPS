@@ -14,12 +14,12 @@ const CONFIG = {
   APPROVAL_DELAY_STEP_MINUTES: 5,
 
   // Random simulation timing. The engine uses a variable timeout instead of a fixed tick.
-  RANDOM_EVENT_MIN_SECONDS: 25,
-  RANDOM_EVENT_MAX_SECONDS: 110,
-  STORM_EVENT_MIN_SECONDS: 15,
-  STORM_EVENT_MAX_SECONDS: 55,
-  WINDY_EVENT_MIN_SECONDS: 20,
-  WINDY_EVENT_MAX_SECONDS: 80,
+  RANDOM_EVENT_MIN_SECONDS: 10,
+  RANDOM_EVENT_MAX_SECONDS: 42,
+  STORM_EVENT_MIN_SECONDS: 8,
+  STORM_EVENT_MAX_SECONDS: 28,
+  WINDY_EVENT_MIN_SECONDS: 10,
+  WINDY_EVENT_MAX_SECONDS: 34,
 
   // Weather only evaluates the current hour. If the condition continues into
   // the next hour, that hour is evaluated separately.
