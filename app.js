@@ -15,6 +15,7 @@ let HISTORY = [];
 let operationalDayKey = getOperationalDayKey();
 let randomEventTimer = null;
 let syncQueue = new Map();
+let SHEET_FLIGHT_IDS = new Set();
 let syncTimer = null;
 let unreadEventCount = 0;
 let nextRandomEventAt = null;
@@ -1903,6 +1904,7 @@ async function resetSimulation(reason, preserveCarryovers) {
     const data = await fetchSheetJson(SHEET_URL + '?' + params.toString());
     if (data.error) throw new Error(data.error || 'Reset failed');
     FLIGHTS = dedupeFlightsById((data.rows || []).map(rowToFlight));
+    SHEET_FLIGHT_IDS = new Set(FLIGHTS.map(f => String(f.id || '')).filter(Boolean));
     const normalized = normalizeResetScheduleToZeroConflicts();
     if (normalized.remaining === 0) {
       logActivity(`Reset schedule normalized to 0 conflicts${normalized.moved ? `; ${normalized.moved} flight${normalized.moved === 1 ? '' : 's'} repositioned` : ''}.`, 'RESET');
@@ -2000,6 +2002,8 @@ async function loadFromSheet() {
     const data = await fetchSheetJson(SHEET_URL + '?action=list&_=' + Date.now());
     if (data.error || !Array.isArray(data)) throw new Error(data.error || 'Load failed');
     FLIGHTS = dedupeFlightsById(data.map(rowToFlight));
+    // Only IDs actually returned by Google Sheets are ever eligible for Sheet writes.
+    SHEET_FLIGHT_IDS = new Set(FLIGHTS.map(f => String(f.id || '')).filter(Boolean));
     const restored = restoreOperationalState();
     setSyncStatus('online', `● Synced (${new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',hour12:true})})${restored ? ' · game restored' : ''}`);
     renderBoard();
@@ -2016,6 +2020,11 @@ function queueFlightSync(flight) {
   // operational state, but must never become rows in the recurring Google Sheet.
   if (String(flight?.id || '').startsWith('sim_') || flight?.ops?.inboundDiversion) return;
   if (!SHEET_URL) return;
+  const flightId = String(flight?.id || '');
+  // Absolute no-append rule: if this flight was not already present in the
+  // Google Sheet when loaded, it may exist in the simulation but it cannot
+  // create a new Sheet row.
+  if (!SHEET_FLIGHT_IDS.has(flightId)) return;
   syncQueue.set(flight.id, flightToRow(flight));
   clearTimeout(syncTimer); syncTimer = setTimeout(flushSyncQueue, 500);
 }

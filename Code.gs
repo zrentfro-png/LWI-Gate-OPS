@@ -236,17 +236,15 @@ function upsertRow(rowObj) {
   const sheet = getLiveSheet();
   const headers = getHeaders(sheet);
 
-  let id = String(rowObj[ID_COLUMN] || rowObj.id || '').trim();
-  if (!id) id = Utilities.getUuid();
-  rowObj[ID_COLUMN] = id;
+  const id = String(rowObj[ID_COLUMN] || rowObj.id || '').trim();
+  if (!id) throw new Error('Missing GATEOPS ID. New flight rows are not allowed.');
 
   const rowIndex = findRowIndexById(sheet, id);
   if (rowIndex === -1) {
-    const rowValues = headers.map(header => Object.prototype.hasOwnProperty.call(rowObj, header) ? rowObj[header] : '');
-    sheet.appendRow(rowValues);
-    return id;
+    throw new Error('Unknown GATEOPS ID "' + id + '". New flight rows are not allowed; only existing rows may be updated.');
   }
 
+  rowObj[ID_COLUMN] = id;
   Object.keys(rowObj).forEach(header => {
     const columnIndex = headers.indexOf(header);
     if (columnIndex === -1) return;
@@ -273,9 +271,14 @@ function resetOperationalSheet(carryovers) {
   ensureSchema(live);
   ensureIds(live);
 
+  // Never append carryover rows. This Sheet is an authoritative fixed roster:
+  // reset may only restore/update rows that already exist in the baseline/live sheet.
   (carryovers || []).forEach(row => {
     const copy = Object.assign({}, row);
-    copy[ID_COLUMN] = copy[ID_COLUMN] || Utilities.getUuid();
+    const id = String(copy[ID_COLUMN] || copy.id || '').trim();
+    if (!id) return;
+    if (findRowIndexById(live, id) === -1) return;
+    copy[ID_COLUMN] = id;
     upsertRow(copy);
   });
 }
