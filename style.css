@@ -48,3 +48,12 @@
 .btn-auto-solve:not(:disabled){border-color:var(--danger);color:var(--danger);background:rgba(229,72,77,.08)}
 .btn-auto-solve:not(:disabled):hover{background:rgba(229,72,77,.16)}
 .event-autosolve{border-left-color:var(--info)}
+
+/* ---------- Destination ATC controls ---------- */
+.multi-city-select {
+  width: 100%;
+  min-height: 150px;
+}
+.multi-city-select option {
+  padding: 6px 8px;
+}

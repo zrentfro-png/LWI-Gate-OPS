@@ -8,8 +8,9 @@ let searchTerm = '';
 let statusFilterVal = 'all';
 let WEATHER = 'CLEAR';
 let WEATHER_LAST_HOUR_KEY = null;
-let GROUND_STOP = null;
+let GROUND_STOP = null; // airport-wide movement closure
 let GROUND_STOP_LAST_ISSUED_AT = 0;
+let ATC_GROUND_STOPS = [];
 let HISTORY = [];
 let operationalDayKey = getOperationalDayKey();
 let randomEventTimer = null;
@@ -20,9 +21,9 @@ let nextRandomEventAt = null;
 let persistTimer = null;
 const OPS_STATE_STORAGE_KEY = 'gateops_operational_state_v1';
 
-const EVENT_ACTIVITY_TYPES = new Set(['DELAY','CANCEL','DIVERT','WEATHER','GROUNDSTOP','AIRLINE','GATE','CREW','NEW','CONFLICT','AUTOSOLVE']);
+const EVENT_ACTIVITY_TYPES = new Set(['DELAY','CANCEL','DIVERT','WEATHER','GROUNDSTOP','ATC','AIRLINE','GATE','CREW','NEW','CONFLICT','AUTOSOLVE']);
 
-const DELAY_TAGS = ['DELAY', 'WEATHER', 'GROUND STOP', 'LATE ARRIVING AIRCRAFT', 'CREW HOLD', 'OTHER'];
+const DELAY_TAGS = ['DELAY', 'WEATHER', 'AIRPORT CLOSURE', 'ATC GROUND STOP', 'GROUND STOP', 'LATE ARRIVING AIRCRAFT', 'CREW HOLD', 'OTHER'];
 
 function getOperationalDayKey() {
   const now = new Date();
@@ -50,6 +51,7 @@ function saveOperationalStateNow() {
       weatherLastHourKey: WEATHER_LAST_HOUR_KEY,
       groundStop: serializeGroundStop(GROUND_STOP),
       groundStopLastIssuedAt: GROUND_STOP_LAST_ISSUED_AT,
+      atcGroundStops: ATC_GROUND_STOPS.map(gs => ({ ...gs, affected: Array.isArray(gs.affected) ? gs.affected : [] })),
       history: HISTORY.map(h => ({ ...h, time: h.time instanceof Date ? h.time.toISOString() : h.time })),
       unreadEventCount,
       nextRandomEventAt,
@@ -101,6 +103,7 @@ function restoreOperationalState() {
   WEATHER_LAST_HOUR_KEY = saved.weatherLastHourKey || null;
   GROUND_STOP = saved.groundStop ? { ...saved.groundStop, applied: new Set(saved.groundStop.applied || []) } : null;
   GROUND_STOP_LAST_ISSUED_AT = Number(saved.groundStopLastIssuedAt) || 0;
+  ATC_GROUND_STOPS = Array.isArray(saved.atcGroundStops) ? saved.atcGroundStops.map(gs => ({ ...gs, cities: Array.isArray(gs.cities) ? gs.cities : [], affected: Array.isArray(gs.affected) ? gs.affected : [] })) : [];
   HISTORY = Array.isArray(saved.history) ? saved.history.map(h => ({ ...h, time: new Date(h.time) })) : [];
   unreadEventCount = Number(saved.unreadEventCount) || 0;
   nextRandomEventAt = Number(saved.nextRandomEventAt) || null;
@@ -145,6 +148,7 @@ function restoreOperationalState() {
   const w = document.getElementById('weatherSelect');
   if (w) w.value = WEATHER;
   updateGroundStopStatus();
+  updateAtcGroundStopStatus();
   updateActivityBadge();
   updateEventsBadge();
   return true;
@@ -912,8 +916,10 @@ function renderFlightCard(flight, isConflict) {
   if (!isConflict && flight.status === 'ON TIME') card.style.borderLeftColor = stripeColor;
 
   const requests = [];
-  if (ops.taxiRequested && !ops.taxiApproved) requests.push(`<button class="fc-event-accept" data-approve="taxi" ${isGroundStopActive() ? 'disabled title="Ground stop active"' : ''}>${isGroundStopActive() ? 'Ground Stop' : 'Approve Taxi'}</button>`);
-  if (ops.pushbackRequested && !ops.pushbackApproved) requests.push(`<button class="fc-event-accept" data-approve="pushback" ${isGroundStopActive() ? 'disabled title="Ground stop active"' : ''}>${isGroundStopActive() ? 'Ground Stop' : 'Approve Pushback'}</button>`);
+  const airportClosed = isGroundStopActive();
+  const atcHeld = isFlightAtcHeld(flight);
+  if (ops.taxiRequested && !ops.taxiApproved) requests.push(`<button class="fc-event-accept" data-approve="taxi" ${airportClosed ? 'disabled title="Airport closure active"' : ''}>${airportClosed ? 'Airport Closed' : 'Approve Taxi'}</button>`);
+  if (ops.pushbackRequested && !ops.pushbackApproved) requests.push(`<button class="fc-event-accept" data-approve="pushback" ${(airportClosed || atcHeld) ? `disabled title="${airportClosed ? 'Airport closure active' : 'ATC destination ground stop active'}"` : ''}>${airportClosed ? 'Airport Closed' : atcHeld ? 'ATC Hold' : 'Approve Pushback'}</button>`);
 
   card.innerHTML = `
     <div class="fc-top"><span class="fc-flightnum">${escapeHtml(flight.flightNumber)}</span><span class="fc-to">→ ${escapeHtml(flight.to)}</span></div>
@@ -1272,8 +1278,8 @@ function shiftFlightWholeBlockTo(flight, newStart, reason = 'ground stop') {
   if (oldBoard !== null) flight.boarding = minutesToClockString(oldBoard + shift);
   flight.departure = minutesToClockString(oldDep + shift);
   flight.status = 'DELAYED';
-  flight.delayTag = 'GROUND STOP';
-  flight.comments = [flight.comments, `Held by ground stop until ${minutesToClockString(GROUND_STOP.end)}`].filter(Boolean).join(' · ');
+  flight.delayTag = 'AIRPORT CLOSURE';
+  flight.comments = [flight.comments, `Held by airport closure until ${minutesToClockString(GROUND_STOP.end)}`].filter(Boolean).join(' · ');
   logActivity(`${flight.flightNumber} held +${shift}m (${reason})`, 'DELAY', flight.id);
   queueFlightSync(flight);
   return true;
@@ -1292,7 +1298,7 @@ function processGroundStopLifecycle() {
     if (o.taxiRequested && !o.taxiApproved) o.taxiPenaltyAt = nowMs + graceMs;
     if (o.pushbackRequested && !o.pushbackApproved) o.pushbackPenaltyAt = nowMs + graceMs;
   });
-  logActivity(`Ground stop lifted at ${minutesToClockString(GROUND_STOP.end)}. Movement and approvals may resume.`, 'GROUNDSTOP');
+  logActivity(`Airport closure lifted at ${minutesToClockString(GROUND_STOP.end)}. Local movement and approvals may resume.`, 'GROUNDSTOP');
   renderBoard();
   persistOperationalState();
 }
@@ -1321,7 +1327,9 @@ function processRequiredApprovals() {
       logActivity(`Pushback request: ${f.flightNumber} at ${f.gate}`, 'REQUEST', f.id, 'pushback'); changed = true;
     }
 
-    if (ops.pushbackRequested && !ops.pushbackApproved && nowMs >= ops.pushbackPenaltyAt) {
+    if (ops.pushbackRequested && !ops.pushbackApproved && isFlightAtcHeld(f)) {
+      ops.pushbackPenaltyAt = Number.POSITIVE_INFINITY;
+    } else if (ops.pushbackRequested && !ops.pushbackApproved && nowMs >= ops.pushbackPenaltyAt) {
       if (applyDelay(f, CONFIG.APPROVAL_DELAY_STEP_MINUTES || 5, 'DELAY', 'pushback approval not granted', false)) changed = true;
       ops.pushbackPenaltyAt = nowMs + (CONFIG.APPROVAL_GRACE_MINUTES || 5) * 60000;
     }
@@ -1332,7 +1340,12 @@ function processRequiredApprovals() {
 function approveOperation(flightId, type) {
   const f = FLIGHTS.find(x => x.id === flightId); if (!f) return;
   if (isGroundStopActive()) {
-    logActivity(`Approval blocked during ground stop: ${f.flightNumber} ${type}`, 'GROUNDSTOP', f.id);
+    logActivity(`Approval blocked during airport closure: ${f.flightNumber} ${type}`, 'GROUNDSTOP', f.id);
+    renderBoard();
+    return;
+  }
+  if (type === 'pushback' && isFlightAtcHeld(f)) {
+    logActivity(`Pushback blocked by ATC destination ground stop: ${f.flightNumber} → ${f.to}`, 'ATC', f.id);
     renderBoard();
     return;
   }
@@ -1368,28 +1381,57 @@ function processWeatherHour() {
   if (count) renderBoard();
 }
 
-function issueGroundStop(durationMinutes, source = 'manual') {
+function airportClosureCancellationChance(durationMinutes) {
+  const d = Math.max(0, Number(durationMinutes) || 0);
+  if (d < 30) return 0;
+  if (d < 45) return 0.02;
+  if (d < 60) return 0.04;
+  if (d < 90) return 0.08;
+  if (d < 120) return 0.14;
+  if (d < 180) return 0.24;
+  if (d < 240) return 0.36;
+  return 0.48;
+}
+
+function issueAirportClosure(durationMinutes, source = 'manual') {
   const start = nowTimelineMinutes();
   const end = start + durationMinutes;
-  GROUND_STOP = { id: `gs_${Date.now()}`, start, end, durationMinutes, applied: new Set(), lifted: false };
+  GROUND_STOP = { id: `closure_${Date.now()}`, start, end, durationMinutes, applied: new Set(), lifted: false, source };
   GROUND_STOP_LAST_ISSUED_AT = Date.now();
 
-  let count = 0;
-  FLIGHTS.forEach(f => {
-    if (f.status === 'CANCELLED' || f.status === 'DIVERTED' || isDeparted(f)) return;
+  const impacted = FLIGHTS.filter(f => {
+    if (f.status === 'CANCELLED' || f.status === 'DIVERTED' || isDeparted(f)) return false;
     const gateStart = gateStartMinutes(f);
     const dep = toTimelineMinutes(f.departure);
-    if (gateStart === null || dep === null) return;
+    if (gateStart === null || dep === null) return false;
+    return (gateStart >= start && gateStart < end) || (dep >= start && dep < end);
+  });
 
+  const cancelChance = airportClosureCancellationChance(durationMinutes);
+  let cancelled = 0;
+  let count = 0;
+
+  impacted.forEach(f => {
+    // Airlines increasingly cancel rather than recover every flight as a closure gets longer.
+    if (cancelChance > 0 && Math.random() < cancelChance) {
+      f.status = 'CANCELLED';
+      f.delayTag = 'AIRPORT CLOSURE';
+      f.comments = [f.comments, `Cancelled during ${durationMinutes}m airport closure`].filter(Boolean).join(' · ');
+      logActivity(`${f.flightNumber} cancelled during airport closure (${durationMinutes}m shutdown)`, 'CANCEL', f.id);
+      queueFlightSync(f);
+      cancelled++;
+      return;
+    }
+
+    const gateStart = gateStartMinutes(f);
+    const dep = toTimelineMinutes(f.departure);
     let changed = false;
-    // If the aircraft was supposed to taxi into the gate during the stop,
-    // the whole gate occupancy window moves so taxi movement starts only after release.
+
     if (gateStart >= start && gateStart < end) {
-      changed = shiftFlightWholeBlockTo(f, end, `ground stop ${minutesToClockString(start)}–${minutesToClockString(end)}`);
+      changed = shiftFlightWholeBlockTo(f, end, `airport closure ${minutesToClockString(start)}–${minutesToClockString(end)}`);
     } else if (dep >= start && dep < end) {
-      // Aircraft already at the gate may remain there, but cannot push back until release.
       const delay = Math.max(5, Math.ceil((end - dep) / 5) * 5);
-      changed = applyDelay(f, delay, 'GROUND STOP', `movement frozen until ${minutesToClockString(end)}`, false);
+      changed = applyDelay(f, delay, 'AIRPORT CLOSURE', `airport closed until ${minutesToClockString(end)}`, false);
     }
 
     if (changed) {
@@ -1398,15 +1440,28 @@ function issueGroundStop(durationMinutes, source = 'manual') {
     }
   });
 
-  // Freeze any approval timers that were already pending. They will receive a fresh
-  // grace period when the stop lifts instead of being penalized during the freeze.
+  // For a long closure with a meaningful number of affected flights, guarantee at least
+  // one cancellation if random chance happened to produce none. This keeps multi-hour
+  // closures from unrealistically recovering every single flight.
+  if (durationMinutes >= 90 && impacted.length >= 6 && cancelled === 0) {
+    const candidate = impacted.find(f => f.status !== 'CANCELLED' && f.status !== 'DIVERTED' && !isDeparted(f));
+    if (candidate) {
+      candidate.status = 'CANCELLED';
+      candidate.delayTag = 'AIRPORT CLOSURE';
+      candidate.comments = [candidate.comments, `Cancelled during extended airport closure`].filter(Boolean).join(' · ');
+      logActivity(`${candidate.flightNumber} cancelled during extended airport closure`, 'CANCEL', candidate.id);
+      queueFlightSync(candidate);
+      cancelled++;
+    }
+  }
+
   FLIGHTS.forEach(f => {
     const o = ensureOps(f);
     if (o.taxiRequested && !o.taxiApproved) o.taxiPenaltyAt = Number.POSITIVE_INFINITY;
     if (o.pushbackRequested && !o.pushbackApproved) o.pushbackPenaltyAt = Number.POSITIVE_INFINITY;
   });
 
-  logActivity(`FULL GROUND STOP ${minutesToClockString(start)}–${minutesToClockString(end)}: all aircraft movement frozen; ${count} flight${count === 1 ? '' : 's'} immediately held/delayed`, 'GROUNDSTOP');
+  logActivity(`AIRPORT CLOSURE ${minutesToClockString(start)}–${minutesToClockString(end)}: all local movement frozen; ${count} flight${count === 1 ? '' : 's'} held/delayed${cancelled ? `; ${cancelled} cancelled` : ''}`, 'GROUNDSTOP');
   updateGroundStopStatus();
   renderBoard();
   persistOperationalState();
@@ -1414,9 +1469,122 @@ function issueGroundStop(durationMinutes, source = 'manual') {
 
 function updateGroundStopStatus() {
   const el = document.getElementById('groundStopStatus'); if (!el) return;
-  if (!GROUND_STOP) { el.textContent = 'No active ground stop'; return; }
+  if (!GROUND_STOP) { el.textContent = 'No active airport closure'; return; }
   if (nowTimelineMinutes() >= GROUND_STOP.end) { el.textContent = `Lifted at ${minutesToClockString(GROUND_STOP.end)}`; return; }
-  el.textContent = `FULL STOP — no movement or approvals until ${minutesToClockString(GROUND_STOP.end)}`;
+  el.textContent = `AIRPORT CLOSED — no local movement or approvals until ${minutesToClockString(GROUND_STOP.end)}`;
+}
+
+
+function normalizeDestination(value) {
+  return String(value || '').trim().toUpperCase();
+}
+
+function activeAtcGroundStops() {
+  const nowM = nowTimelineMinutes();
+  return ATC_GROUND_STOPS.filter(gs => !gs.lifted && nowM >= gs.start && nowM < gs.end);
+}
+
+function isFlightAtcHeld(flight) {
+  if (!flight || flight.status === 'CANCELLED' || flight.status === 'DIVERTED') return false;
+  const dest = normalizeDestination(flight.to);
+  if (!dest) return false;
+  return activeAtcGroundStops().some(gs => (gs.cities || []).map(normalizeDestination).includes(dest));
+}
+
+function populateAtcCityOptions() {
+  const select = document.getElementById('atcCities');
+  if (!select) return;
+  const previous = new Set([...select.selectedOptions].map(o => o.value));
+  const cities = [...new Set(FLIGHTS.map(f => String(f.to || '').trim()).filter(Boolean))]
+    .sort((a,b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  select.innerHTML = '';
+  cities.forEach(city => {
+    const opt = document.createElement('option');
+    opt.value = city;
+    opt.textContent = city;
+    opt.selected = previous.has(city);
+    select.appendChild(opt);
+  });
+}
+
+function issueAtcGroundStop(cities, durationMinutes, source = 'manual') {
+  const cleanCities = [...new Set((cities || []).map(c => String(c || '').trim()).filter(Boolean))];
+  if (!cleanCities.length) return false;
+  const start = nowTimelineMinutes();
+  const end = start + durationMinutes;
+  const stop = {
+    id: `atc_${Date.now()}_${Math.random().toString(36).slice(2,6)}`,
+    cities: cleanCities,
+    start,
+    end,
+    durationMinutes,
+    source,
+    lifted: false,
+    affected: [],
+  };
+  ATC_GROUND_STOPS.push(stop);
+
+  let held = 0;
+  FLIGHTS.forEach(f => {
+    if (f.status === 'CANCELLED' || f.status === 'DIVERTED' || isDeparted(f)) return;
+    if (!cleanCities.some(city => normalizeDestination(city) === normalizeDestination(f.to))) return;
+    const dep = toTimelineMinutes(f.departure);
+    if (dep === null || dep < start || dep >= end) return;
+
+    const delay = Math.max(5, Math.ceil((end - dep) / 5) * 5);
+    if (applyDelay(f, delay, 'ATC GROUND STOP', `ATC departure hold to ${f.to} until ${minutesToClockString(end)}`, false)) {
+      stop.affected.push(f.id);
+      held++;
+    }
+
+    const o = ensureOps(f);
+    if (o.pushbackRequested && !o.pushbackApproved) o.pushbackPenaltyAt = Number.POSITIVE_INFINITY;
+  });
+
+  logActivity(`ATC GROUND STOP to ${cleanCities.join(', ')} ${minutesToClockString(start)}–${minutesToClockString(end)}: ${held} departure${held === 1 ? '' : 's'} held; other destinations unaffected`, 'ATC');
+  updateAtcGroundStopStatus();
+  renderBoard();
+  persistOperationalState();
+  return true;
+}
+
+function processAtcGroundStopLifecycle() {
+  const nowM = nowTimelineMinutes();
+  let changed = false;
+  const graceMs = (CONFIG.APPROVAL_GRACE_MINUTES || 5) * 60000;
+  const nowMs = Date.now();
+
+  ATC_GROUND_STOPS.forEach(gs => {
+    if (gs.lifted || nowM < gs.end) return;
+    gs.lifted = true;
+    changed = true;
+    const citySet = new Set((gs.cities || []).map(normalizeDestination));
+    FLIGHTS.forEach(f => {
+      if (!citySet.has(normalizeDestination(f.to))) return;
+      const o = ensureOps(f);
+      if (o.pushbackRequested && !o.pushbackApproved) o.pushbackPenaltyAt = nowMs + graceMs;
+    });
+    logActivity(`ATC ground stop lifted for ${gs.cities.join(', ')} at ${minutesToClockString(gs.end)}. Held departures may push once approved.`, 'ATC');
+  });
+
+  // Keep the current operational day's stops for history/status, but trim stale ones eventually.
+  if (ATC_GROUND_STOPS.length > 30) ATC_GROUND_STOPS = ATC_GROUND_STOPS.slice(-30);
+  if (changed) {
+    updateAtcGroundStopStatus();
+    renderBoard();
+    persistOperationalState();
+  }
+}
+
+function updateAtcGroundStopStatus() {
+  const el = document.getElementById('atcGroundStopStatus');
+  if (!el) return;
+  const active = activeAtcGroundStops();
+  if (!active.length) {
+    el.textContent = 'No active destination ATC ground stops';
+    return;
+  }
+  el.innerHTML = active.map(gs => `${escapeHtml(gs.cities.join(', '))} held until ${escapeHtml(minutesToClockString(gs.end))}`).join('<br>');
 }
 
 function randomFutureFlight(maxAhead = 120, airline = null) {
@@ -1488,35 +1656,54 @@ function randomCrewEvent() {
   return ok;
 }
 
+function randomAtcGroundStop() {
+  const now = nowTimelineMinutes();
+  const candidates = FLIGHTS.filter(f => {
+    const dep = toTimelineMinutes(f.departure);
+    return dep !== null && dep > now && dep <= now + 180 && !isDeparted(f) &&
+      f.status !== 'CANCELLED' && f.status !== 'DIVERTED' && normalizeDestination(f.to);
+  });
+  const cities = [...new Set(candidates.map(f => String(f.to || '').trim()).filter(Boolean))];
+  if (!cities.length) return false;
+
+  // Usually one destination, occasionally two related restrictions at once.
+  cities.sort(() => Math.random() - 0.5);
+  const count = cities.length > 1 && Math.random() < 0.18 ? 2 : 1;
+  const selected = cities.slice(0, count);
+  const duration = [20, 30, 45, 60, 75, 90][Math.floor(Math.random() * 6)];
+  return issueAtcGroundStop(selected, duration, 'rare random ATC event');
+}
+
 function spawnRandomEvent() {
   if (isGroundStopActive()) { scheduleNextRandomEvent(); return; }
   const r = Math.random();
   let happened = false;
 
-  if (r < 0.24) {
-    const f = randomFutureFlight(120);
-    if (f) happened = applyDelay(f, [5,10,15,20,30][Math.floor(Math.random()*5)], Math.random() < .3 ? 'CREW HOLD' : 'OTHER', 'random operational delay');
-  } else if (r < 0.39) {
-    happened = randomAirlineDisruption();
-  } else if (r < 0.50) {
-    happened = randomGateEvent();
-  } else if (r < 0.59) {
-    happened = randomCrewEvent();
-  } else if (r < 0.66) {
-    const f = randomFutureFlight(90);
-    if (f) { f.status = 'CANCELLED'; f.delayTag = 'OTHER'; logActivity(`Random event: ${f.flightNumber} cancelled`, 'CANCEL', f.id); queueFlightSync(f); happened = true; }
-  } else if (r < 0.72) {
-    const f = randomFutureFlight(90);
-    if (f) { f.status = 'DIVERTED'; f.delayTag = 'OTHER'; logActivity(`Random event: ${f.flightNumber} diverted`, 'DIVERT', f.id); queueFlightSync(f); happened = true; }
-  } else if (r < 0.728) {
-    // Ground stops are intentionally rare. Do not issue one while another
-    // is active or within the configured cooldown window.
+  // Airport-wide closures and destination ATC stops are intentionally uncommon.
+  // At the normal event cadence these should feel exceptional, not routine.
+  if (r < 0.001) {
     const cooldownMs = (CONFIG.GROUND_STOP_COOLDOWN_MINUTES || 90) * 60000;
     if (!GROUND_STOP && Date.now() - GROUND_STOP_LAST_ISSUED_AT >= cooldownMs) {
-      issueGroundStop([15,20,30,45][Math.floor(Math.random()*4)], 'rare random event');
-      GROUND_STOP_LAST_ISSUED_AT = Date.now();
+      issueAirportClosure([20,30,45,60][Math.floor(Math.random()*4)], 'rare random airport closure');
       happened = true;
     }
+  } else if (r < 0.004) {
+    happened = randomAtcGroundStop();
+  } else if (r < 0.244) {
+    const f = randomFutureFlight(120);
+    if (f) happened = applyDelay(f, [5,10,15,20,30][Math.floor(Math.random()*5)], Math.random() < .3 ? 'CREW HOLD' : 'OTHER', 'random operational delay');
+  } else if (r < 0.394) {
+    happened = randomAirlineDisruption();
+  } else if (r < 0.504) {
+    happened = randomGateEvent();
+  } else if (r < 0.594) {
+    happened = randomCrewEvent();
+  } else if (r < 0.664) {
+    const f = randomFutureFlight(90);
+    if (f) { f.status = 'CANCELLED'; f.delayTag = 'OTHER'; logActivity(`Random event: ${f.flightNumber} cancelled`, 'CANCEL', f.id); queueFlightSync(f); happened = true; }
+  } else if (r < 0.724) {
+    const f = randomFutureFlight(90);
+    if (f) { f.status = 'DIVERTED'; f.delayTag = 'OTHER'; logActivity(`Random event: ${f.flightNumber} diverted`, 'DIVERT', f.id); queueFlightSync(f); happened = true; }
   } else if (r < 0.91) {
     WEATHER = Math.random() < .72 ? 'STORM' : 'WINDY';
     WEATHER_LAST_HOUR_KEY = null;
@@ -1524,7 +1711,7 @@ function spawnRandomEvent() {
     logActivity(`Random weather event: ${WEATHER === 'STORM' ? 'THUNDERSTORM' : 'WINDY CONDITIONS'}`, 'WEATHER');
     processWeatherHour(); happened = true;
   } else {
-    createRandomFlight(); happened = true;
+    happened = createRandomFlight();
   }
 
   if (!happened) {
@@ -1656,9 +1843,9 @@ function collectCarryovers() {
 
 async function resetSimulation(reason, preserveCarryovers) {
   clearPersistedOperationalState();
-  WEATHER = 'CLEAR'; WEATHER_LAST_HOUR_KEY = null; GROUND_STOP = null; GROUND_STOP_LAST_ISSUED_AT = 0; nextRandomEventAt = null;
+  WEATHER = 'CLEAR'; WEATHER_LAST_HOUR_KEY = null; GROUND_STOP = null; GROUND_STOP_LAST_ISSUED_AT = 0; ATC_GROUND_STOPS = []; nextRandomEventAt = null;
   HISTORY = []; unreadEventCount = 0;
-  document.getElementById('weatherSelect').value = 'CLEAR'; updateGroundStopStatus();
+  document.getElementById('weatherSelect').value = 'CLEAR'; updateGroundStopStatus(); updateAtcGroundStopStatus();
   const carryovers = preserveCarryovers ? collectCarryovers() : [];
   logActivity(`— Simulation reset (${reason})${carryovers.length ? `; ${carryovers.length} carryover flight(s)` : ''} —`, 'RESET');
   if (!SHEET_URL) { FLIGHTS = CONFIG.SAMPLE_FLIGHTS.map(f => ({...f})); renderBoard(); return; }
@@ -1690,7 +1877,14 @@ function renderHistoryPanel() {
     if (o.taxiRequested && !o.taxiApproved) approvals.push({ f, kind:'taxi', label:'Approve Taxi' });
     if (o.pushbackRequested && !o.pushbackApproved) approvals.push({ f, kind:'pushback', label:'Approve Pushback' });
   });
-  const approvalHtml = approvals.map(a => `<div class="activity-request"><div><strong>${escapeHtml(a.f.flightNumber)}</strong> · ${escapeHtml(a.f.gate)}<small>${a.kind === 'taxi' ? 'Taxi to gate requested' : 'Pushback requested'}${isGroundStopActive() ? ' · PAUSED BY GROUND STOP' : ''}</small></div><button class="btn btn-primary btn-sm" data-approve-flight="${escapeHtml(a.f.id)}" data-approve-kind="${a.kind}" ${isGroundStopActive() ? 'disabled' : ''}>${isGroundStopActive() ? 'Ground Stop' : a.label}</button></div>`).join('');
+  const approvalHtml = approvals.map(a => {
+    const airportClosed = isGroundStopActive();
+    const atcHeld = a.kind === 'pushback' && isFlightAtcHeld(a.f);
+    const blocked = airportClosed || atcHeld;
+    const pauseText = airportClosed ? ' · PAUSED BY AIRPORT CLOSURE' : atcHeld ? ` · ATC HOLD TO ${escapeHtml(a.f.to)}` : '';
+    const buttonText = airportClosed ? 'Airport Closed' : atcHeld ? 'ATC Hold' : a.label;
+    return `<div class="activity-request"><div><strong>${escapeHtml(a.f.flightNumber)}</strong> · ${escapeHtml(a.f.gate)}<small>${a.kind === 'taxi' ? 'Taxi to gate requested' : 'Pushback requested'}${pauseText}</small></div><button class="btn btn-primary btn-sm" data-approve-flight="${escapeHtml(a.f.id)}" data-approve-kind="${a.kind}" ${blocked ? 'disabled' : ''}>${buttonText}</button></div>`;
+  }).join('');
   const historyHtml = HISTORY.length ? HISTORY.map(h => `<div class="history-row"><span class="history-time">${h.time.toLocaleTimeString([], {hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true})}</span><span>${escapeHtml(h.text)}</span></div>`).join('') : '<div class="history-empty">No activity yet this session.</div>';
   list.innerHTML = `${approvalHtml}${historyHtml}`;
   list.querySelectorAll('[data-approve-flight]').forEach(btn => btn.addEventListener('click', () => approveOperation(btn.dataset.approveFlight, btn.dataset.approveKind)));
@@ -1757,6 +1951,7 @@ async function loadFromSheet() {
     const restored = restoreOperationalState();
     setSyncStatus('online', `● Synced (${new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',hour12:true})})${restored ? ' · game restored' : ''}`);
     renderBoard();
+    populateAtcCityOptions();
     renderHistoryPanel();
     renderEventsPanel();
     scheduleNextRandomEvent(true);
@@ -1798,10 +1993,16 @@ document.getElementById('eventsBtn').addEventListener('click', () => {
   document.getElementById('eventsModal').classList.remove('hidden');
 });
 document.getElementById('eventsModalClose').addEventListener('click', () => document.getElementById('eventsModal').classList.add('hidden'));
-document.getElementById('settingsBtn').addEventListener('click', () => { document.getElementById('weatherSelect').value = WEATHER; updateGroundStopStatus(); document.getElementById('settingsModal').classList.remove('hidden'); });
+document.getElementById('settingsBtn').addEventListener('click', () => { document.getElementById('weatherSelect').value = WEATHER; populateAtcCityOptions(); updateGroundStopStatus(); updateAtcGroundStopStatus(); document.getElementById('settingsModal').classList.remove('hidden'); });
 document.getElementById('settingsModalClose').addEventListener('click', () => document.getElementById('settingsModal').classList.add('hidden'));
 document.getElementById('weatherSelect').addEventListener('change', e => { WEATHER = e.target.value; WEATHER_LAST_HOUR_KEY = null; logActivity(`Weather set to ${WEATHER}`, 'WEATHER'); processWeatherHour(); scheduleNextRandomEvent(); renderBoard(); });
-document.getElementById('issueGroundStopBtn').addEventListener('click', () => issueGroundStop(Math.max(5, Number(document.getElementById('groundStopMinutes').value) || 30), 'manual'));
+document.getElementById('issueGroundStopBtn').addEventListener('click', () => issueAirportClosure(Math.max(5, Number(document.getElementById('groundStopMinutes').value) || 30), 'manual'));
+document.getElementById('issueAtcGroundStopBtn').addEventListener('click', () => {
+  const select = document.getElementById('atcCities');
+  const cities = [...select.selectedOptions].map(o => o.value).filter(Boolean);
+  if (!cities.length) { alert('Select at least one destination city.'); return; }
+  issueAtcGroundStop(cities, Math.max(5, Number(document.getElementById('atcGroundStopMinutes').value) || 30), 'manual');
+});
 document.getElementById('resetSimBtn').addEventListener('click', () => { if (confirm('Reset the live board back to the protected baseline schedule now?')) { resetSimulation('manual reset', false); document.getElementById('settingsModal').classList.add('hidden'); } });
 document.getElementById('searchBox').addEventListener('input', e => { searchTerm = e.target.value; renderBoard(); });
 document.getElementById('statusFilter').addEventListener('change', e => { statusFilterVal = e.target.value; renderBoard(); });
@@ -1822,7 +2023,7 @@ function init() {
     scheduleNextRandomEvent(true);
   }
   setInterval(tickClock, 1000);
-  setInterval(() => { processGroundStopLifecycle(); processRequiredApprovals(); processWeatherHour(); checkDailyReset(); updateGroundStopStatus(); persistOperationalState(); }, 15000);
+  setInterval(() => { processGroundStopLifecycle(); processAtcGroundStopLifecycle(); processRequiredApprovals(); processWeatherHour(); checkDailyReset(); updateGroundStopStatus(); updateAtcGroundStopStatus(); persistOperationalState(); }, 15000);
   setInterval(renderBoard, 60000);
   window.addEventListener('beforeunload', saveOperationalStateNow);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveOperationalStateNow(); });

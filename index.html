@@ -63,6 +63,8 @@
           <option value="">None</option>
           <option value="DELAY">Delay</option>
           <option value="WEATHER">Weather</option>
+          <option value="AIRPORT CLOSURE">Airport Closure</option>
+          <option value="ATC GROUND STOP">ATC Ground Stop</option>
           <option value="GROUND STOP">Ground Stop</option>
           <option value="LATE ARRIVING AIRCRAFT">Late Arriving Aircraft</option>
           <option value="CREW HOLD">Crew Hold</option>
@@ -99,7 +101,7 @@
   <div class="modal modal-wide">
     <div class="modal-header"><h2>Activity Center</h2><button id="historyModalClose" class="modal-close">&times;</button></div>
     <div class="modal-body">
-      <p class="modal-help">Taxi and pushback requests, approvals, weather, ground stops, delays, conflicts, cancellations, diversions, gate changes, and random events appear here.</p>
+      <p class="modal-help">Taxi and pushback requests, approvals, weather, airport closures, ATC ground stops, delays, conflicts, cancellations, diversions, gate changes, and random events appear here.</p>
       <div id="historyList" class="history-list"></div>
     </div>
   </div>
@@ -109,7 +111,7 @@
   <div class="modal modal-wide">
     <div class="modal-header"><h2>Events</h2><button id="eventsModalClose" class="modal-close">&times;</button></div>
     <div class="modal-body">
-      <p class="modal-help">Operational surprises and disruptions live here: delays, airline disruptions, cancellations, diversions, weather, ground stops, gate problems, crew holds, conflicts, and added flights. Taxi/pushback requests remain in Activity.</p>
+      <p class="modal-help">Operational surprises and disruptions live here: delays, airline disruptions, cancellations, diversions, weather, airport closures, ATC ground stops, gate problems, crew holds, conflicts, and added flights. Taxi/pushback requests remain in Activity.</p>
       <div id="eventsList" class="events-list"></div>
     </div>
   </div>
@@ -127,11 +129,22 @@
         </select>
       </label>
       <div class="condition-box">
-        <div class="condition-title">Ground stop</div>
-        <p class="modal-help">Only departures inside the stop window are automatically delayed.</p>
-        <label>Duration (minutes)<input id="groundStopMinutes" type="number" min="5" max="240" step="5" value="30" /></label>
-        <button type="button" id="issueGroundStopBtn" class="btn btn-ghost">Issue Ground Stop</button>
-        <div id="groundStopStatus" class="condition-status">No active ground stop</div>
+        <div class="condition-title">Airport closure / ramp shutdown</div>
+        <p class="modal-help">Freezes all local aircraft movement. Taxi and pushback approvals stop. Flights that need to move during the closure are held until reopening, and longer closures can realistically cancel some affected flights.</p>
+        <label>Duration (minutes)<input id="groundStopMinutes" type="number" min="5" max="360" step="5" value="30" /></label>
+        <button type="button" id="issueGroundStopBtn" class="btn btn-ghost">Close Airport</button>
+        <div id="groundStopStatus" class="condition-status">No active airport closure</div>
+      </div>
+      <div class="condition-box">
+        <div class="condition-title">ATC destination ground stop</div>
+        <p class="modal-help">Holds only departures going to the selected destination(s). Those flights can taxi normally, but cannot push back until the ATC stop ends. Other destinations continue operating.</p>
+        <label>Destination city / cities
+          <select id="atcCities" class="multi-city-select" multiple size="7"></select>
+        </label>
+        <p class="modal-help">Use Ctrl/Cmd-click to select more than one destination.</p>
+        <label>Duration (minutes)<input id="atcGroundStopMinutes" type="number" min="5" max="360" step="5" value="30" /></label>
+        <button type="button" id="issueAtcGroundStopBtn" class="btn btn-ghost">Issue ATC Ground Stop</button>
+        <div id="atcGroundStopStatus" class="condition-status">No active destination ATC ground stops</div>
       </div>
       <div class="modal-actions"><button type="button" id="resetSimBtn" class="btn btn-danger-ghost">Reset Simulation Now</button></div>
     </div>
