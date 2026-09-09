@@ -116,10 +116,13 @@ function restoreOperationalState() {
     f.ops = sf.ops ? { ...sf.ops } : null;
   });
 
-  // If a random/new flight existed locally but its Sheet write had not
-  // completed before the refresh, keep it instead of losing the event.
+  // Only resurrect locally-created simulation flights that may not have
+  // reached the Sheet before a refresh. Never resurrect an ordinary scheduled
+  // flight: doing that can create a second copy when the Sheet response was
+  // briefly stale during a move/save.
   for (const sf of saved.flights || []) {
-    if (liveIds.has(String(sf.id))) continue;
+    const sid = String(sf.id || '');
+    if (liveIds.has(sid) || !sid.startsWith('sim_')) continue;
     FLIGHTS.push({
       id: sf.id,
       airline: sf.airline || '',
@@ -135,7 +138,9 @@ function restoreOperationalState() {
       base: sf.base || null,
       ops: sf.ops ? { ...sf.ops } : null,
     });
+    liveIds.add(sid);
   }
+  normalizeFlightCollection();
 
   const w = document.getElementById('weatherSelect');
   if (w) w.value = WEATHER;
@@ -330,6 +335,26 @@ function isDeparted(flight) {
   return nowTimelineMinutes() > dep && !ops.pushbackRequested;
 }
 
+function dedupeFlightsById(flights) {
+  const out = [];
+  const seen = new Set();
+  for (const flight of flights || []) {
+    const id = String(flight?.id || '').trim();
+    if (!id) {
+      out.push(flight);
+      continue;
+    }
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(flight);
+  }
+  return out;
+}
+
+function normalizeFlightCollection() {
+  FLIGHTS = dedupeFlightsById(FLIGHTS);
+}
+
 function computeConflicts() {
   const conflicts = new Map();
   const byGate = {};
@@ -341,6 +366,7 @@ function computeConflicts() {
     list.sort((a, b) => (gateStartMinutes(a) ?? Infinity) - (gateStartMinutes(b) ?? Infinity));
     for (let i = 0; i < list.length; i++) {
       for (let j = i + 1; j < list.length; j++) {
+        if (String(list[i].id) === String(list[j].id)) continue;
         const a = occupancyWindow(list[i]), b = occupancyWindow(list[j]);
         if (a && b && windowsOverlap(a, b)) conflicts.set(list[j].id, list[i].id);
       }
@@ -671,6 +697,7 @@ function renderTimeHeader() {
 }
 
 function renderBoard() {
+  normalizeFlightCollection();
   const board = document.getElementById('board');
   board.innerHTML = '';
   const conflicts = computeConflicts();
@@ -873,10 +900,18 @@ document.getElementById('flightForm').addEventListener('submit', e => {
 
   const gateInfo = GATE_BY_ID[data.gate];
   if (gateInfo && !airlinesMatch(gateInfo.airline, effectiveAirline(data)) && !confirm(`Gate ${data.gate} belongs to ${gateInfo.airline}. Save anyway?`)) return;
-  const idx = FLIGHTS.findIndex(f => f.id === id);
-  if (idx >= 0) FLIGHTS[idx] = data; else FLIGHTS.push(data);
-  logActivity(`${idx >= 0 ? 'Edited' : 'Added'} ${data.flightNumber}`, 'EDIT', id);
-  queueFlightSync(data); renderBoard(); closeFlightModal();
+  const idx = FLIGHTS.findIndex(f => String(f.id) === String(id));
+  let savedFlight;
+  if (idx >= 0) {
+    Object.assign(FLIGHTS[idx], data);
+    savedFlight = FLIGHTS[idx];
+  } else {
+    FLIGHTS.push(data);
+    savedFlight = data;
+  }
+  normalizeFlightCollection();
+  logActivity(`${idx >= 0 ? 'Edited' : 'Added'} ${savedFlight.flightNumber}`, 'EDIT', id);
+  queueFlightSync(savedFlight); renderBoard(); closeFlightModal();
 });
 
 document.getElementById('deleteFlightBtn').addEventListener('click', async () => {
@@ -1294,7 +1329,7 @@ async function loadFromSheet() {
   try {
     const data = await fetchSheetJson(SHEET_URL + '?action=list&_=' + Date.now());
     if (data.error || !Array.isArray(data)) throw new Error(data.error || 'Load failed');
-    FLIGHTS = data.map(rowToFlight);
+    FLIGHTS = dedupeFlightsById(data.map(rowToFlight));
     const restored = restoreOperationalState();
     setSyncStatus('online', `● Synced (${new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',hour12:true})})${restored ? ' · game restored' : ''}`);
     renderBoard();

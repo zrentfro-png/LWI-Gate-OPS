@@ -90,6 +90,7 @@ function ensureSystemReady() {
   const sheet = getLiveSheet();
   ensureSchema(sheet);
   ensureIds(sheet);
+  removeDuplicateRowsById(sheet);
   ensureBaselineExists();
 }
 
@@ -129,6 +130,30 @@ function ensureIds(sheet) {
   }
   // Only write the ID column. Never rewrite the image/formula columns.
   if (changed) sheet.getRange(2, idIndex + 1, idValues.length, 1).setValues(idValues);
+}
+
+function removeDuplicateRowsById(sheet) {
+  const headers = getHeaders(sheet);
+  const idIndex = headers.indexOf(ID_COLUMN);
+  if (idIndex === -1) return;
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 3) return;
+
+  const ids = sheet.getRange(2, idIndex + 1, lastRow - 1, 1).getValues();
+  const seen = new Set();
+  const duplicateRows = [];
+  for (let i = 0; i < ids.length; i++) {
+    const id = String(ids[i][0] || '').trim();
+    if (!id) continue;
+    if (seen.has(id)) duplicateRows.push(i + 2);
+    else seen.add(id);
+  }
+
+  // Delete bottom-up so row numbers remain valid. The first occurrence is
+  // authoritative because all normal upserts update that row in place.
+  for (let i = duplicateRows.length - 1; i >= 0; i--) {
+    sheet.deleteRow(duplicateRows[i]);
+  }
 }
 
 function ensureBaselineExists() {
