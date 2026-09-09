@@ -1458,15 +1458,85 @@ function spawnRandomEvent() {
 }
 
 function createRandomFlight() {
-  const airlines = [...new Set(CONFIG.GATE_MAP.map(g => g.airline))];
-  const airline = airlines[Math.floor(Math.random()*airlines.length)];
-  const gates = GATE_LIST.filter(g => g.airline === airline); if (!gates.length) return;
-  const gate = gates[Math.floor(Math.random()*gates.length)];
-  const dep = nowTimelineMinutes() + 30 + Math.floor(Math.random()*90);
+  // Randomly-created flights represent INBOUND DIVERSIONS arriving at this
+  // airport. They may use ANY physical gate regardless of normal airline
+  // ownership, but they are never allowed to displace, move, or delay an
+  // existing flight. If no conflict-free slot exists, no diversion is added.
+  const airlines = [...new Set(CONFIG.GATE_MAP.map(g => g.airline))].filter(Boolean);
+  if (!airlines.length || !GATE_LIST.length) return false;
+
+  const airline = airlines[Math.floor(Math.random() * airlines.length)];
+  const duration = CONFIG.TURNAROUND_MINUTES || 90;
+  const now = nowTimelineMinutes();
+  const earliestStart = Math.max(now + 5, Math.ceil((now + 5) / INTERVAL_MIN) * INTERVAL_MIN);
+  const latestStart = TIMELINE_END_MIN - duration;
+  const candidateStarts = [];
+
+  // Prefer a reasonably soon arrival, but keep searching later if the airport
+  // is busy. This delay belongs only to the diversion's placement; it never
+  // modifies any scheduled flight already on the board.
+  for (let start = earliestStart; start <= latestStart; start += INTERVAL_MIN) {
+    candidateStarts.push(start);
+  }
+
+  // Randomize gate order so diversions spread around the airport, while still
+  // considering every gate as a valid emergency/diversion stand.
+  const gates = [...GATE_LIST].sort(() => Math.random() - 0.5);
+  let placement = null;
+
+  for (const start of candidateStarts) {
+    const end = start + duration;
+    for (const gate of gates) {
+      const probe = {
+        id: '__diversion_probe__',
+        gate: gate.id,
+        gateStart: minutesToClockString(start),
+        departure: minutesToClockString(end),
+        status: 'ON TIME'
+      };
+      const w = occupancyWindow(probe);
+      if (!w) continue;
+      const blocked = FLIGHTS.some(other => {
+        if (other.status === 'CANCELLED' || other.status === 'DIVERTED' || isDeparted(other)) return false;
+        if (other.gate !== gate.id) return false;
+        const ow = occupancyWindow(other);
+        return ow && windowsOverlap(w, ow);
+      });
+      if (!blocked) {
+        placement = { gate, start, end };
+        break;
+      }
+    }
+    if (placement) break;
+  }
+
+  if (!placement) {
+    logActivity('Inbound diversion could not be accepted: no conflict-free gate slot available before 5:00 AM', 'DIVERT');
+    return false;
+  }
+
   const id = `sim_${Date.now()}_${Math.random().toString(36).slice(2,6)}`;
   const prefixes = { UNITED:'UA', AMERICAN:'AA', DELTA:'DL', SOUTHWEST:'WN', ALASKA:'AS', JETBLUE:'B6', FRONTIER:'F9', SPIRIT:'NK', HAWAIIAN:'HA', AVELO:'XP' };
-  const flight = { id, airline, flightNumber: `${prefixes[airline] || 'GT'}${Math.floor(100+Math.random()*8900)}`, to: ['DEN','ORD','ATL','DFW','LAX','PHX','MCO','SEA'][Math.floor(Math.random()*8)], gate: gate.id, boarding: minutesToClockString(dep-30), departure: minutesToClockString(dep), status:'ON TIME', comments:'Random added flight', delayTag:'', gateStart: minutesToClockString(dep-(CONFIG.TURNAROUND_MINUTES||90)), base:null, ops:null };
-  FLIGHTS.push(flight); logActivity(`Random new flight: ${flight.flightNumber} → ${flight.to}, gate ${flight.gate}`, 'NEW', id); queueFlightSync(flight);
+  const flight = {
+    id,
+    airline,
+    flightNumber: `${prefixes[airline] || 'GT'}${Math.floor(100 + Math.random() * 8900)}`,
+    to: ['DEN','ORD','ATL','DFW','LAX','PHX','MCO','SEA'][Math.floor(Math.random() * 8)],
+    gate: placement.gate.id,
+    boarding: minutesToClockString(placement.end - 30),
+    departure: minutesToClockString(placement.end),
+    status: 'ON TIME',
+    comments: 'Inbound diversion — emergency/open-gate assignment',
+    delayTag: '',
+    gateStart: minutesToClockString(placement.start),
+    base: null,
+    ops: { inboundDiversion: true }
+  };
+
+  FLIGHTS.push(flight);
+  logActivity(`Inbound diversion accepted: ${flight.flightNumber} assigned ${flight.gate} with no scheduled flights displaced`, 'DIVERT', id);
+  queueFlightSync(flight);
+  return true;
 }
 
 function scheduleNextRandomEvent(resumeSaved = false) {
