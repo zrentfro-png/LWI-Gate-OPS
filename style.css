@@ -42,3 +42,9 @@
 .event-cancel,.event-divert,.event-conflict{border-left-color:var(--danger)}
 .event-delay,.event-groundstop,.event-weather,.event-airline,.event-gate,.event-crew{border-left-color:var(--warn)}
 .event-new{border-left-color:var(--ok)}
+
+
+.btn:disabled{opacity:.45;cursor:not-allowed;filter:none}
+.btn-auto-solve:not(:disabled){border-color:var(--danger);color:var(--danger);background:rgba(229,72,77,.08)}
+.btn-auto-solve:not(:disabled):hover{background:rgba(229,72,77,.16)}
+.event-autosolve{border-left-color:var(--info)}

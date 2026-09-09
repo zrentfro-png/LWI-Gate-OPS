@@ -16,7 +16,7 @@ let syncQueue = new Map();
 let syncTimer = null;
 let unreadEventCount = 0;
 
-const EVENT_ACTIVITY_TYPES = new Set(['DELAY','CANCEL','DIVERT','WEATHER','GROUNDSTOP','AIRLINE','GATE','CREW','NEW','CONFLICT']);
+const EVENT_ACTIVITY_TYPES = new Set(['DELAY','CANCEL','DIVERT','WEATHER','GROUNDSTOP','AIRLINE','GATE','CREW','NEW','CONFLICT','AUTOSOLVE']);
 
 const DELAY_TAGS = ['DELAY', 'WEATHER', 'GROUND STOP', 'LATE ARRIVING AIRCRAFT', 'CREW HOLD', 'OTHER'];
 
@@ -82,6 +82,22 @@ function updateEventsBadge() {
   if (!badge) return;
   badge.textContent = unreadEventCount;
   badge.classList.toggle('hidden', unreadEventCount === 0);
+}
+
+
+function markDelayedForTimeChange(flight, reason = 'time changed') {
+  if (!flight || flight.status === 'CANCELLED' || flight.status === 'DIVERTED') return;
+  const wasDelayed = flight.status === 'DELAYED';
+  flight.status = 'DELAYED';
+  if (!flight.delayTag) flight.delayTag = 'DELAY';
+  if (!wasDelayed) logActivity(`${flight.flightNumber} marked DELAYED (${reason})`, 'DELAY', flight.id);
+}
+
+function timeValueChanged(a, b) {
+  const am = toTimelineMinutes(a);
+  const bm = toTimelineMinutes(b);
+  if (am !== null && bm !== null) return am !== bm;
+  return String(a || '').trim() !== String(b || '').trim();
 }
 
 function buildGateList() {
@@ -258,6 +274,102 @@ function suggestResolutionsFor(flight) {
   return out.sort((a, b) => a.score - b.score).slice(0, 6);
 }
 
+
+function findAutoSolveCandidate(flight, maxDelayMinutes = 360) {
+  if (!flight || isDeparted(flight) || flight.status === 'CANCELLED' || flight.status === 'DIVERTED') return null;
+  const dep = toTimelineMinutes(flight.departure);
+  const start = gateStartMinutes(flight);
+  if (dep === null || start === null) return null;
+
+  const currentGate = GATE_BY_ID[flight.gate];
+  const compatible = GATE_LIST.filter(g => airlinesMatch(g.airline, effectiveAirline(flight)));
+  let best = null;
+
+  // Auto-solve is intentionally delay-only: it never moves a flight earlier.
+  for (let delay = INTERVAL_MIN; delay <= maxDelayMinutes; delay += INTERVAL_MIN) {
+    const newDep = dep + delay;
+    if (newDep >= TIMELINE_END_MIN) break;
+
+    for (const gate of compatible) {
+      if (testConflict(flight, gate.id, newDep, start)) continue;
+      const gateDistance = currentGate ? Math.abs(gate.num - currentGate.num) : 0;
+      const concoursePenalty = currentGate && gate.concourse !== currentGate.concourse ? 250 : 0;
+      const gateChangePenalty = gate.id === flight.gate ? 0 : 20;
+      const score = delay * 10 + gateDistance * 5 + concoursePenalty + gateChangePenalty;
+      const candidate = { flight, gate: gate.id, departure: newDep, delay, score };
+      if (!best || candidate.score < best.score) best = candidate;
+    }
+
+    // Once we found something at this delay amount, don't consider larger
+    // delays unless they were needed to get any solution at all.
+    if (best) break;
+  }
+  return best;
+}
+
+function applyAutoSolveCandidate(candidate) {
+  if (!candidate) return false;
+  const { flight, gate, departure, delay } = candidate;
+  const oldGate = flight.gate;
+  const oldDeparture = flight.departure;
+
+  flight.gate = gate;
+  flight.departure = minutesToClockString(departure);
+  markDelayedForTimeChange(flight, 'automatic conflict resolution');
+  if (!flight.delayTag) flight.delayTag = 'DELAY';
+
+  logActivity(
+    `AUTO SOLVE: ${flight.flightNumber} ${oldGate} → ${gate}, ${displayClockTime(oldDeparture)} → ${displayClockTime(flight.departure)} (+${delay}m)`,
+    'AUTOSOLVE',
+    flight.id
+  );
+  queueFlightSync(flight);
+  return true;
+}
+
+function autoSolveAllConflicts() {
+  const button = document.getElementById('autoSolveBtn');
+  if (button) { button.disabled = true; button.textContent = 'Solving…'; }
+
+  let solvedMoves = 0;
+  let guard = 0;
+  const maxIterations = Math.max(100, FLIGHTS.length * 4);
+
+  while (guard++ < maxIterations) {
+    const conflicts = computeConflicts();
+    if (!conflicts.size) break;
+
+    const [laterId, blockerId] = conflicts.entries().next().value;
+    const later = FLIGHTS.find(f => f.id === laterId);
+    const blocker = FLIGHTS.find(f => f.id === blockerId);
+
+    // We are allowed to move either aircraft. Pick whichever can be fixed
+    // with the smallest delay / gate disruption.
+    const options = [findAutoSolveCandidate(later), findAutoSolveCandidate(blocker)].filter(Boolean);
+    if (!options.length) {
+      // Try a wider search before giving up on this conflict.
+      const wideOptions = [findAutoSolveCandidate(later, 720), findAutoSolveCandidate(blocker, 720)].filter(Boolean);
+      if (!wideOptions.length) break;
+      wideOptions.sort((a, b) => a.score - b.score);
+      applyAutoSolveCandidate(wideOptions[0]);
+    } else {
+      options.sort((a, b) => a.score - b.score);
+      applyAutoSolveCandidate(options[0]);
+    }
+    solvedMoves++;
+  }
+
+  const remaining = computeConflicts();
+  if (remaining.size === 0) {
+    logActivity(`AUTO SOLVE complete: ${solvedMoves} flight${solvedMoves === 1 ? '' : 's'} adjusted; no gate conflicts remain.`, 'AUTOSOLVE');
+  } else {
+    logActivity(`AUTO SOLVE stopped after ${solvedMoves} adjustment${solvedMoves === 1 ? '' : 's'}; ${remaining.size} conflict${remaining.size === 1 ? '' : 's'} still need manual attention.`, 'CONFLICT');
+  }
+  renderBoard();
+
+  if (button) { button.disabled = remaining.size === 0; button.textContent = 'Auto Solve'; }
+}
+
 function escapeHtml(str) {
   const div = document.createElement('div');
   div.textContent = str ?? '';
@@ -416,9 +528,11 @@ function attachResizeHandlers(card, flight) {
       if (!delta) { renderBoard(); return; }
       if (isLeft) {
         const gs = gateStartMinutes(flight); if (gs !== null) flight.gateStart = minutesToClockString(gs + delta);
+        markDelayedForTimeChange(flight, 'gate block time changed');
         logActivity(`Gate block resized: ${flight.flightNumber} start → ${flight.gateStart}`, 'EDIT', flight.id);
       } else {
         const dep = toTimelineMinutes(flight.departure); if (dep !== null) flight.departure = minutesToClockString(dep + delta);
+        markDelayedForTimeChange(flight, 'departure time changed');
         logActivity(`Gate block resized: ${flight.flightNumber} departure → ${flight.departure}`, 'EDIT', flight.id);
       }
       if (flight.status !== 'CANCELLED' && flight.status !== 'DIVERTED') queueFlightSync(flight);
@@ -447,9 +561,11 @@ function handleGateDrop(flightId, newGate, gateOwner) {
 
 function updateConflictBanner(conflicts) {
   const banner = document.getElementById('conflictBanner');
+  const autoBtn = document.getElementById('autoSolveBtn');
+  if (autoBtn) autoBtn.disabled = conflicts.size === 0;
   if (!conflicts.size) { banner.classList.add('hidden'); return; }
   banner.classList.remove('hidden');
-  banner.textContent = `⚠ ${conflicts.size} gate conflict${conflicts.size > 1 ? 's' : ''} — click a conflicted flight for minimal-change gate/time solutions.`;
+  banner.textContent = `⚠ ${conflicts.size} gate conflict${conflicts.size > 1 ? 's' : ''} — use Auto Solve or click a conflicted flight for manual minimal-change solutions.`;
 }
 
 function populateAirlineOptions() {
@@ -518,6 +634,10 @@ document.getElementById('flightForm').addEventListener('submit', e => {
     base: existing ? existing.base : null,
     ops: existing ? existing.ops : null,
   };
+  if (existing && (timeValueChanged(existing.departure, data.departure) || timeValueChanged(existing.boarding, data.boarding))) {
+    markDelayedForTimeChange(data, 'scheduled time changed');
+  }
+
   const gateInfo = GATE_BY_ID[data.gate];
   if (gateInfo && !airlinesMatch(gateInfo.airline, effectiveAirline(data)) && !confirm(`Gate ${data.gate} belongs to ${gateInfo.airline}. Save anyway?`)) return;
   const idx = FLIGHTS.findIndex(f => f.id === id);
@@ -965,6 +1085,7 @@ document.getElementById('resetSimBtn').addEventListener('click', () => { if (con
 document.getElementById('searchBox').addEventListener('input', e => { searchTerm = e.target.value; renderBoard(); });
 document.getElementById('statusFilter').addEventListener('change', e => { statusFilterVal = e.target.value; renderBoard(); });
 document.getElementById('syncBtn').addEventListener('click', () => loadFromSheet());
+document.getElementById('autoSolveBtn').addEventListener('click', autoSolveAllConflicts);
 
 function tickClock() { document.getElementById('clock').textContent = new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true}); }
 
