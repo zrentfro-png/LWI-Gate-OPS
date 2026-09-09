@@ -912,8 +912,8 @@ function renderFlightCard(flight, isConflict) {
   if (!isConflict && flight.status === 'ON TIME') card.style.borderLeftColor = stripeColor;
 
   const requests = [];
-  if (ops.taxiRequested && !ops.taxiApproved) requests.push(`<button class="fc-event-accept" data-approve="taxi">Approve Taxi</button>`);
-  if (ops.pushbackRequested && !ops.pushbackApproved) requests.push(`<button class="fc-event-accept" data-approve="pushback">Approve Pushback</button>`);
+  if (ops.taxiRequested && !ops.taxiApproved) requests.push(`<button class="fc-event-accept" data-approve="taxi" ${isGroundStopActive() ? 'disabled title="Ground stop active"' : ''}>${isGroundStopActive() ? 'Ground Stop' : 'Approve Taxi'}</button>`);
+  if (ops.pushbackRequested && !ops.pushbackApproved) requests.push(`<button class="fc-event-accept" data-approve="pushback" ${isGroundStopActive() ? 'disabled title="Ground stop active"' : ''}>${isGroundStopActive() ? 'Ground Stop' : 'Approve Pushback'}</button>`);
 
   card.innerHTML = `
     <div class="fc-top"><span class="fc-flightnum">${escapeHtml(flight.flightNumber)}</span><span class="fc-to">→ ${escapeHtml(flight.to)}</span></div>
@@ -1256,7 +1256,49 @@ function restoreFlightFromBaseline(f) {
   f.ops = null; logActivity(`${f.flightNumber} returned to baseline schedule`, 'RESET', f.id); queueFlightSync(f);
 }
 
+
+function isGroundStopActive() {
+  return !!(GROUND_STOP && nowTimelineMinutes() >= GROUND_STOP.start && nowTimelineMinutes() < GROUND_STOP.end);
+}
+
+function shiftFlightWholeBlockTo(flight, newStart, reason = 'ground stop') {
+  const oldStart = gateStartMinutes(flight);
+  const oldBoard = toTimelineMinutes(flight.boarding);
+  const oldDep = toTimelineMinutes(flight.departure);
+  if (oldStart === null || oldDep === null) return false;
+  const shift = Math.max(0, newStart - oldStart);
+  if (!shift) return false;
+  flight.gateStart = minutesToClockString(oldStart + shift);
+  if (oldBoard !== null) flight.boarding = minutesToClockString(oldBoard + shift);
+  flight.departure = minutesToClockString(oldDep + shift);
+  flight.status = 'DELAYED';
+  flight.delayTag = 'GROUND STOP';
+  flight.comments = [flight.comments, `Held by ground stop until ${minutesToClockString(GROUND_STOP.end)}`].filter(Boolean).join(' · ');
+  logActivity(`${flight.flightNumber} held +${shift}m (${reason})`, 'DELAY', flight.id);
+  queueFlightSync(flight);
+  return true;
+}
+
+function processGroundStopLifecycle() {
+  if (!GROUND_STOP) return;
+  const nowM = nowTimelineMinutes();
+  if (nowM < GROUND_STOP.end) return;
+  if (GROUND_STOP.lifted) return;
+  GROUND_STOP.lifted = true;
+  const graceMs = (CONFIG.APPROVAL_GRACE_MINUTES || 5) * 60000;
+  const nowMs = Date.now();
+  FLIGHTS.forEach(f => {
+    const o = ensureOps(f);
+    if (o.taxiRequested && !o.taxiApproved) o.taxiPenaltyAt = nowMs + graceMs;
+    if (o.pushbackRequested && !o.pushbackApproved) o.pushbackPenaltyAt = nowMs + graceMs;
+  });
+  logActivity(`Ground stop lifted at ${minutesToClockString(GROUND_STOP.end)}. Movement and approvals may resume.`, 'GROUNDSTOP');
+  renderBoard();
+  persistOperationalState();
+}
+
 function processRequiredApprovals() {
+  if (isGroundStopActive()) return;
   const nowM = nowTimelineMinutes(); const nowMs = Date.now(); let changed = false;
   FLIGHTS.forEach(f => {
     if (f.status === 'CANCELLED' || f.status === 'DIVERTED' || isDeparted(f)) return;
@@ -1289,6 +1331,11 @@ function processRequiredApprovals() {
 
 function approveOperation(flightId, type) {
   const f = FLIGHTS.find(x => x.id === flightId); if (!f) return;
+  if (isGroundStopActive()) {
+    logActivity(`Approval blocked during ground stop: ${f.flightNumber} ${type}`, 'GROUNDSTOP', f.id);
+    renderBoard();
+    return;
+  }
   const o = ensureOps(f);
   if (type === 'taxi') { o.taxiApproved = true; logActivity(`Taxi approved: ${f.flightNumber} → ${f.gate}`, 'APPROVAL', f.id); }
   if (type === 'pushback') { o.pushbackApproved = true; logActivity(`Pushback approved: ${f.flightNumber} at ${f.gate}`, 'APPROVAL', f.id); }
@@ -1322,23 +1369,54 @@ function processWeatherHour() {
 }
 
 function issueGroundStop(durationMinutes, source = 'manual') {
-  const start = nowTimelineMinutes(); const end = start + durationMinutes;
-  GROUND_STOP = { id: `gs_${Date.now()}`, start, end, durationMinutes, applied: new Set() };
+  const start = nowTimelineMinutes();
+  const end = start + durationMinutes;
+  GROUND_STOP = { id: `gs_${Date.now()}`, start, end, durationMinutes, applied: new Set(), lifted: false };
+  GROUND_STOP_LAST_ISSUED_AT = Date.now();
+
   let count = 0;
   FLIGHTS.forEach(f => {
+    if (f.status === 'CANCELLED' || f.status === 'DIVERTED' || isDeparted(f)) return;
+    const gateStart = gateStartMinutes(f);
     const dep = toTimelineMinutes(f.departure);
-    if (dep === null || dep < start || dep >= end || isDeparted(f) || f.status === 'CANCELLED' || f.status === 'DIVERTED') return;
-    const delay = Math.max(5, Math.ceil((end - dep) / 5) * 5);
-    if (applyDelay(f, delay, 'GROUND STOP', `ground stop until ${minutesToClockString(end)}`)) { GROUND_STOP.applied.add(f.id); count++; }
+    if (gateStart === null || dep === null) return;
+
+    let changed = false;
+    // If the aircraft was supposed to taxi into the gate during the stop,
+    // the whole gate occupancy window moves so taxi movement starts only after release.
+    if (gateStart >= start && gateStart < end) {
+      changed = shiftFlightWholeBlockTo(f, end, `ground stop ${minutesToClockString(start)}–${minutesToClockString(end)}`);
+    } else if (dep >= start && dep < end) {
+      // Aircraft already at the gate may remain there, but cannot push back until release.
+      const delay = Math.max(5, Math.ceil((end - dep) / 5) * 5);
+      changed = applyDelay(f, delay, 'GROUND STOP', `movement frozen until ${minutesToClockString(end)}`, false);
+    }
+
+    if (changed) {
+      GROUND_STOP.applied.add(f.id);
+      count++;
+    }
   });
-  logActivity(`Ground stop issued for ${durationMinutes}m (${minutesToClockString(start)}–${minutesToClockString(end)}); ${count} departure${count === 1 ? '' : 's'} directly affected`, 'GROUNDSTOP');
-  updateGroundStopStatus(); renderBoard();
+
+  // Freeze any approval timers that were already pending. They will receive a fresh
+  // grace period when the stop lifts instead of being penalized during the freeze.
+  FLIGHTS.forEach(f => {
+    const o = ensureOps(f);
+    if (o.taxiRequested && !o.taxiApproved) o.taxiPenaltyAt = Number.POSITIVE_INFINITY;
+    if (o.pushbackRequested && !o.pushbackApproved) o.pushbackPenaltyAt = Number.POSITIVE_INFINITY;
+  });
+
+  logActivity(`FULL GROUND STOP ${minutesToClockString(start)}–${minutesToClockString(end)}: all aircraft movement frozen; ${count} flight${count === 1 ? '' : 's'} immediately held/delayed`, 'GROUNDSTOP');
+  updateGroundStopStatus();
+  renderBoard();
+  persistOperationalState();
 }
 
 function updateGroundStopStatus() {
   const el = document.getElementById('groundStopStatus'); if (!el) return;
-  if (!GROUND_STOP || nowTimelineMinutes() >= GROUND_STOP.end) { el.textContent = 'No active ground stop'; return; }
-  el.textContent = `Active until ${minutesToClockString(GROUND_STOP.end)}`;
+  if (!GROUND_STOP) { el.textContent = 'No active ground stop'; return; }
+  if (nowTimelineMinutes() >= GROUND_STOP.end) { el.textContent = `Lifted at ${minutesToClockString(GROUND_STOP.end)}`; return; }
+  el.textContent = `FULL STOP — no movement or approvals until ${minutesToClockString(GROUND_STOP.end)}`;
 }
 
 function randomFutureFlight(maxAhead = 120, airline = null) {
@@ -1411,6 +1489,7 @@ function randomCrewEvent() {
 }
 
 function spawnRandomEvent() {
+  if (isGroundStopActive()) { scheduleNextRandomEvent(); return; }
   const r = Math.random();
   let happened = false;
 
@@ -1611,7 +1690,7 @@ function renderHistoryPanel() {
     if (o.taxiRequested && !o.taxiApproved) approvals.push({ f, kind:'taxi', label:'Approve Taxi' });
     if (o.pushbackRequested && !o.pushbackApproved) approvals.push({ f, kind:'pushback', label:'Approve Pushback' });
   });
-  const approvalHtml = approvals.map(a => `<div class="activity-request"><div><strong>${escapeHtml(a.f.flightNumber)}</strong> · ${escapeHtml(a.f.gate)}<small>${a.kind === 'taxi' ? 'Taxi to gate requested' : 'Pushback requested'}</small></div><button class="btn btn-primary btn-sm" data-approve-flight="${escapeHtml(a.f.id)}" data-approve-kind="${a.kind}">${a.label}</button></div>`).join('');
+  const approvalHtml = approvals.map(a => `<div class="activity-request"><div><strong>${escapeHtml(a.f.flightNumber)}</strong> · ${escapeHtml(a.f.gate)}<small>${a.kind === 'taxi' ? 'Taxi to gate requested' : 'Pushback requested'}${isGroundStopActive() ? ' · PAUSED BY GROUND STOP' : ''}</small></div><button class="btn btn-primary btn-sm" data-approve-flight="${escapeHtml(a.f.id)}" data-approve-kind="${a.kind}" ${isGroundStopActive() ? 'disabled' : ''}>${isGroundStopActive() ? 'Ground Stop' : a.label}</button></div>`).join('');
   const historyHtml = HISTORY.length ? HISTORY.map(h => `<div class="history-row"><span class="history-time">${h.time.toLocaleTimeString([], {hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true})}</span><span>${escapeHtml(h.text)}</span></div>`).join('') : '<div class="history-empty">No activity yet this session.</div>';
   list.innerHTML = `${approvalHtml}${historyHtml}`;
   list.querySelectorAll('[data-approve-flight]').forEach(btn => btn.addEventListener('click', () => approveOperation(btn.dataset.approveFlight, btn.dataset.approveKind)));
@@ -1743,7 +1822,7 @@ function init() {
     scheduleNextRandomEvent(true);
   }
   setInterval(tickClock, 1000);
-  setInterval(() => { processRequiredApprovals(); processWeatherHour(); checkDailyReset(); updateGroundStopStatus(); persistOperationalState(); }, 15000);
+  setInterval(() => { processGroundStopLifecycle(); processRequiredApprovals(); processWeatherHour(); checkDailyReset(); updateGroundStopStatus(); persistOperationalState(); }, 15000);
   setInterval(renderBoard, 60000);
   window.addEventListener('beforeunload', saveOperationalStateNow);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') saveOperationalStateNow(); });
