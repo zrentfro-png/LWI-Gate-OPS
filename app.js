@@ -172,10 +172,57 @@ function ensureOps(flight) {
   return flight.ops;
 }
 
+const AIRLINE_PREFIX_MAP = {
+  UA: 'UNITED',
+  WN: 'SOUTHWEST',
+  DL: 'DELTA',
+  AA: 'AMERICAN',
+  B6: 'JETBLUE',
+  AS: 'ALASKA',
+  F9: 'FRONTIER',
+  NK: 'SPIRIT',
+  G4: 'ALLEGIANT',
+  HA: 'HAWAIIAN',
+  XP: 'AVELO',
+  MX: 'BREEZE',
+  SY: 'SUN COUNTRY',
+};
+
+function inferAirlineFromFlightNumber(flightNumber) {
+  const fn = (flightNumber || '').toString().trim().toUpperCase().replace(/\s+/g, '');
+  if (!fn) return '';
+  const two = fn.slice(0, 2);
+  return AIRLINE_PREFIX_MAP[two] || '';
+}
+
+function canonicalAirlineName(value) {
+  const raw = normalizeAirline(value);
+  if (!raw) return '';
+  const aliases = {
+    'UNITED AIRLINES': 'UNITED',
+    'SOUTHWEST AIRLINES': 'SOUTHWEST',
+    'DELTA AIR LINES': 'DELTA',
+    'DELTA AIRLINES': 'DELTA',
+    'AMERICAN AIRLINES': 'AMERICAN',
+    'JETBLUE AIRWAYS': 'JETBLUE',
+    'ALASKA AIRLINES': 'ALASKA',
+    'FRONTIER AIRLINES': 'FRONTIER',
+    'SPIRIT AIRLINES': 'SPIRIT',
+    'ALLEGIANT AIR': 'ALLEGIANT',
+    'HAWAIIAN AIRLINES': 'HAWAIIAN',
+    'AVELO AIRLINES': 'AVELO',
+    'BREEZE AIRWAYS': 'BREEZE',
+    'SUN COUNTRY AIRLINES': 'SUN COUNTRY',
+  };
+  return aliases[raw] || raw;
+}
+
 function effectiveAirline(flight) {
-  const fn = (flight.flightNumber || '').toString().trim().toUpperCase();
-  if (fn.startsWith('B6')) return 'JETBLUE';
-  return flight.airline;
+  const inferred = inferAirlineFromFlightNumber(flight?.flightNumber);
+  // Flight number is authoritative when recognizable. This also preserves the
+  // special B6/JetBlue behavior even if the Sheet's AIRLINE cell is wrong.
+  if (inferred) return inferred;
+  return canonicalAirlineName(flight?.airline);
 }
 
 function logActivity(text, type = 'INFO', flightId = null, action = null) {
@@ -319,7 +366,7 @@ function minutesToX(mins) { return ((mins - TIMELINE_START_MIN) / INTERVAL_MIN) 
 
 function normalizeAirline(str) { return (str || '').toString().trim().toUpperCase(); }
 function airlinesMatch(a, b) {
-  const na = normalizeAirline(a), nb = normalizeAirline(b);
+  const na = canonicalAirlineName(a), nb = canonicalAirlineName(b);
   return !!na && !!nb && (na === nb || na.includes(nb) || nb.includes(na));
 }
 function isWrongAirlineGate(flight) {
@@ -1155,7 +1202,7 @@ document.getElementById('flightForm').addEventListener('submit', e => {
   const existing = FLIGHTS.find(f => f.id === id);
   const data = {
     id,
-    airline: document.getElementById('f_airline').value,
+    airline: canonicalAirlineName(document.getElementById('f_airline').value) || inferAirlineFromFlightNumber(document.getElementById('f_flightnum').value),
     flightNumber: document.getElementById('f_flightnum').value.trim(),
     to: document.getElementById('f_to').value.trim().toUpperCase(),
     gate: document.getElementById('f_gate').value.trim().toUpperCase(),
@@ -1913,9 +1960,12 @@ function setSyncStatus(state, label) { const el = document.getElementById('syncS
 function rowToFlight(row) {
   const dep = row['DEPARTURE TIME:'] || '';
   const gateStart = row['GATE BLOCK START:'] || '';
+  const flightNumber = row['FLIGHT NUMBER'] || '';
+  const rawAirline = row['AIRLINE'] || row['AIRLINE:'] || '';
+  const airline = canonicalAirlineName(rawAirline) || inferAirlineFromFlightNumber(flightNumber);
   return {
     id: row['GATEOPS ID'] || row.id || `legacy_${Math.random()}`,
-    airline: row['AIRLINE'] || '', flightNumber: row['FLIGHT NUMBER'] || '', to: row['TO:'] || '', gate: row['GATE:'] || '',
+    airline, flightNumber, to: row['TO:'] || '', gate: row['GATE:'] || '',
     boarding: row['BOARDING TIME:'] || '', departure: dep, status: row['STATUS:'] || 'ON TIME', comments: row['COMMENTS'] || '', delayTag: row['DELAY TAG:'] || '',
     gateStart,
     base: row.__IS_BASELINE ? { gate: row.__BASE_GATE || '', boarding: row.__BASE_BOARDING || '', departure: row.__BASE_DEPARTURE || '', status: row.__BASE_STATUS || 'ON TIME', comments: row.__BASE_COMMENTS || '', gateStart: row.__BASE_GATE_START || '' } : null,
