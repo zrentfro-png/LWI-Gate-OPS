@@ -355,6 +355,169 @@ function normalizeFlightCollection() {
   FLIGHTS = dedupeFlightsById(FLIGHTS);
 }
 
+
+function getAllDayConflictPairs() {
+  const pairs = [];
+  const byGate = {};
+
+  FLIGHTS.forEach(f => {
+    if (f.status === 'CANCELLED' || f.status === 'DIVERTED') return;
+    const w = occupancyWindow(f);
+    if (!w) return;
+    (byGate[f.gate] ||= []).push(f);
+  });
+
+  Object.values(byGate).forEach(list => {
+    list.sort((a, b) => (gateStartMinutes(a) ?? Infinity) - (gateStartMinutes(b) ?? Infinity));
+    for (let i = 0; i < list.length; i++) {
+      const aw = occupancyWindow(list[i]);
+      if (!aw) continue;
+      for (let j = i + 1; j < list.length; j++) {
+        if (String(list[i].id) === String(list[j].id)) continue;
+        const bw = occupancyWindow(list[j]);
+        if (!bw) continue;
+        if (bw.start >= aw.end) break;
+        if (windowsOverlap(aw, bw)) pairs.push([list[i], list[j]]);
+      }
+    }
+  });
+
+  return pairs;
+}
+
+function normalizeResetScheduleToZeroConflicts() {
+  const initialPairs = getAllDayConflictPairs();
+  if (!initialPairs.length) return { moved: 0, remaining: 0, affected: 0 };
+
+  const affectedIds = new Set();
+  initialPairs.forEach(([a, b]) => { affectedIds.add(a.id); affectedIds.add(b.id); });
+
+  const original = new Map();
+  for (const f of FLIGHTS) {
+    const w = occupancyWindow(f);
+    if (!w) continue;
+    original.set(f.id, {
+      gate: f.gate,
+      start: w.start,
+      end: w.end,
+      duration: Math.max(INTERVAL_MIN, w.end - w.start),
+      departure: f.departure,
+      boarding: f.boarding,
+      gateStart: f.gateStart,
+      status: f.status,
+      delayTag: f.delayTag,
+      comments: f.comments,
+    });
+  }
+
+  const gateBookings = new Map(GATE_LIST.map(g => [g.id, []]));
+  const addBooking = (gate, start, end, flightId) => {
+    if (!gateBookings.has(gate)) gateBookings.set(gate, []);
+    gateBookings.get(gate).push({ start, end, flightId });
+  };
+
+  // Every flight that was clean in the baseline is a fixed reservation.
+  // Reset normalization is not allowed to disturb it.
+  FLIGHTS.forEach(f => {
+    if (affectedIds.has(f.id) || f.status === 'CANCELLED' || f.status === 'DIVERTED') return;
+    const w = occupancyWindow(f);
+    if (w) addBooking(f.gate, w.start, w.end, f.id);
+  });
+
+  const conflictsById = new Map();
+  initialPairs.forEach(([a,b]) => {
+    conflictsById.set(a.id, (conflictsById.get(a.id) || 0) + 1);
+    conflictsById.set(b.id, (conflictsById.get(b.id) || 0) + 1);
+  });
+
+  const affectedFlights = FLIGHTS
+    .filter(f => affectedIds.has(f.id) && original.has(f.id))
+    .sort((a, b) => {
+      const ao = original.get(a.id), bo = original.get(b.id);
+      return ao.start - bo.start || (conflictsById.get(b.id) || 0) - (conflictsById.get(a.id) || 0);
+    });
+
+  function slotFits(gateId, start, end) {
+    return !(gateBookings.get(gateId) || []).some(b => start < b.end && end > b.start);
+  }
+
+  function gatePreference(gate, originalGate, wrongAirline) {
+    const current = GATE_BY_ID[originalGate];
+    const sameGate = gate.id === originalGate ? 0 : 20;
+    const sameConcourse = current && gate.concourse !== current.concourse ? 140 : 0;
+    const distance = current && gate.concourse === current.concourse ? Math.abs(gate.num - current.num) * 3 : 0;
+    return sameGate + sameConcourse + distance + (wrongAirline ? 50000 : 0);
+  }
+
+  function findPlacement(flight) {
+    const o = original.get(flight.id);
+    if (!o) return null;
+    const own = GATE_LIST.filter(g => airlinesMatch(g.airline, effectiveAirline(flight)));
+    const fallback = GATE_LIST.filter(g => !own.some(x => x.id === g.id));
+    let best = null;
+
+    const consider = (gates, wrongAirline) => {
+      for (const gate of gates) {
+        // First try the exact original window. This preserves as many flights as possible.
+        if (slotFits(gate.id, o.start, o.end)) {
+          const score = gatePreference(gate, o.gate, wrongAirline);
+          if (!best || score < best.score) best = { gate: gate.id, start: o.start, end: o.end, score };
+        }
+
+        // Otherwise search later through the entire operational day.
+        for (let start = o.start + INTERVAL_MIN; start + o.duration <= TIMELINE_END_MIN; start += INTERVAL_MIN) {
+          const end = start + o.duration;
+          if (!slotFits(gate.id, start, end)) continue;
+          const delay = end - o.end;
+          const score = delay * 100 + gatePreference(gate, o.gate, wrongAirline);
+          if (!best || score < best.score) best = { gate: gate.id, start, end, score };
+          break;
+        }
+      }
+    };
+
+    consider(own, false);
+    if (!best) consider(fallback, true);
+    return best;
+  }
+
+  let moved = 0;
+  for (const flight of affectedFlights) {
+    const o = original.get(flight.id);
+    const place = findPlacement(flight);
+    if (!o || !place) {
+      // Keep its original reservation so a genuine impossible case remains visible.
+      if (o) addBooking(o.gate, o.start, o.end, flight.id);
+      continue;
+    }
+
+    addBooking(place.gate, place.start, place.end, flight.id);
+    const gateChanged = place.gate !== o.gate;
+    const timeChanged = place.start !== o.start || place.end !== o.end;
+    if (!gateChanged && !timeChanged) continue;
+
+    flight.gate = place.gate;
+    flight.gateStart = minutesToClockString(place.start);
+    flight.departure = minutesToClockString(place.end);
+
+    const oldBoard = toTimelineMinutes(o.boarding);
+    if (oldBoard !== null) {
+      const boardOffset = oldBoard - o.start;
+      flight.boarding = minutesToClockString(place.start + Math.max(0, boardOffset));
+    }
+
+    if (timeChanged) {
+      flight.status = 'DELAYED';
+      flight.delayTag = 'DELAY';
+      flight.comments = flight.comments || 'Reset schedule conflict normalization';
+    }
+    queueFlightSync(flight);
+    moved++;
+  }
+
+  return { moved, remaining: getAllDayConflictPairs().length, affected: affectedIds.size };
+}
+
 function computeConflicts() {
   const conflicts = new Map();
   const byGate = {};
@@ -1354,7 +1517,14 @@ async function resetSimulation(reason, preserveCarryovers) {
     const params = new URLSearchParams({ action: 'reset', carryovers: JSON.stringify(carryovers) });
     const data = await fetchSheetJson(SHEET_URL + '?' + params.toString());
     if (data.error) throw new Error(data.error || 'Reset failed');
-    FLIGHTS = (data.rows || []).map(rowToFlight); renderBoard(); persistOperationalState(); scheduleNextRandomEvent();
+    FLIGHTS = dedupeFlightsById((data.rows || []).map(rowToFlight));
+    const normalized = normalizeResetScheduleToZeroConflicts();
+    if (normalized.remaining === 0) {
+      logActivity(`Reset schedule normalized to 0 conflicts${normalized.moved ? `; ${normalized.moved} flight${normalized.moved === 1 ? '' : 's'} repositioned` : ''}.`, 'RESET');
+    } else {
+      logActivity(`Reset schedule cleanup left ${normalized.remaining} all-day overlap${normalized.remaining === 1 ? '' : 's'} that could not fit before 5:00 AM.`, 'CONFLICT');
+    }
+    renderBoard(); persistOperationalState(); scheduleNextRandomEvent();
   } catch (e) { console.error(e); alert('Could not reset the live sheet to the baseline schedule.'); }
 }
 
