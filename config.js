@@ -21,6 +21,9 @@ const CONFIG = {
   WINDY_EVENT_MIN_SECONDS: 10,
   WINDY_EVENT_MAX_SECONDS: 34,
 
+  // Random ground stops should be exceptional, not constant.
+  GROUND_STOP_COOLDOWN_MINUTES: 90,
+
   // Weather only evaluates the current hour. If the condition continues into
   // the next hour, that hour is evaluated separately.
   STORM_DELAY_MIN_MINUTES: 10,

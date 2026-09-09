@@ -9,6 +9,7 @@ let statusFilterVal = 'all';
 let WEATHER = 'CLEAR';
 let WEATHER_LAST_HOUR_KEY = null;
 let GROUND_STOP = null;
+let GROUND_STOP_LAST_ISSUED_AT = 0;
 let HISTORY = [];
 let operationalDayKey = getOperationalDayKey();
 let randomEventTimer = null;
@@ -48,6 +49,7 @@ function saveOperationalStateNow() {
       weather: WEATHER,
       weatherLastHourKey: WEATHER_LAST_HOUR_KEY,
       groundStop: serializeGroundStop(GROUND_STOP),
+      groundStopLastIssuedAt: GROUND_STOP_LAST_ISSUED_AT,
       history: HISTORY.map(h => ({ ...h, time: h.time instanceof Date ? h.time.toISOString() : h.time })),
       unreadEventCount,
       nextRandomEventAt,
@@ -98,6 +100,7 @@ function restoreOperationalState() {
   WEATHER = saved.weather || 'CLEAR';
   WEATHER_LAST_HOUR_KEY = saved.weatherLastHourKey || null;
   GROUND_STOP = saved.groundStop ? { ...saved.groundStop, applied: new Set(saved.groundStop.applied || []) } : null;
+  GROUND_STOP_LAST_ISSUED_AT = Number(saved.groundStopLastIssuedAt) || 0;
   HISTORY = Array.isArray(saved.history) ? saved.history.map(h => ({ ...h, time: new Date(h.time) })) : [];
   unreadEventCount = Number(saved.unreadEventCount) || 0;
   nextRandomEventAt = Number(saved.nextRandomEventAt) || null;
@@ -358,131 +361,235 @@ function testConflict(flight, gateId, depMinute, gateStartMinute = null) {
 }
 
 function suggestResolutionsFor(flight) {
-  const dep = toTimelineMinutes(flight.departure);
-  const start = gateStartMinutes(flight);
-  if (dep === null || start === null) return [];
-  const currentGate = GATE_BY_ID[flight.gate];
-  const max = CONFIG.CONFLICT_SEARCH_MAX_MINUTES || 120;
-  const offsets = [0];
-  for (let n = 15; n <= max; n += 15) offsets.push(n, -n);
+  const originalWindow = occupancyWindow(flight);
+  if (!originalWindow) return [];
 
+  const currentGate = GATE_BY_ID[flight.gate];
+  const duration = Math.max(INTERVAL_MIN, originalWindow.end - originalWindow.start);
+  const originalBoard = toTimelineMinutes(flight.boarding);
+  const boardOffset = originalBoard === null ? null : originalBoard - originalWindow.start;
+  const earliestStart = Math.max(originalWindow.start, Math.ceil(nowTimelineMinutes() / INTERVAL_MIN) * INTERVAL_MIN);
+  const latestStart = TIMELINE_END_MIN - duration;
+
+  // Prefer the airline's own gates, but if those cannot produce enough valid
+  // choices, allow any physical gate rather than suggesting an impossible slot.
   const compatible = GATE_LIST.filter(g => airlinesMatch(g.airline, effectiveAirline(flight)));
-  compatible.sort((a, b) => {
-    const sa = (a.id === flight.gate ? -1000 : 0) + (currentGate && a.concourse !== currentGate.concourse ? 500 : 0) + (currentGate ? Math.abs(a.num - currentGate.num) : 0);
-    const sb = (b.id === flight.gate ? -1000 : 0) + (currentGate && b.concourse !== currentGate.concourse ? 500 : 0) + (currentGate ? Math.abs(b.num - currentGate.num) : 0);
-    return sa - sb;
-  });
+  const fallback = GATE_LIST.filter(g => !compatible.some(c => c.id === g.id));
+
+  function gatePreference(gate) {
+    if (!currentGate) return 0;
+    const sameGate = gate.id === flight.gate ? -1000 : 0;
+    const sameConcourse = gate.concourse === currentGate.concourse ? 0 : 150;
+    const distance = gate.concourse === currentGate.concourse ? Math.abs(gate.num - currentGate.num) * 4 : 50;
+    return sameGate + sameConcourse + distance;
+  }
+
+  compatible.sort((a, b) => gatePreference(a) - gatePreference(b));
+  fallback.sort((a, b) => gatePreference(a) - gatePreference(b));
 
   const out = [];
-  for (const gate of compatible) {
-    for (const offset of offsets) {
-      const newDep = dep + offset;
-      if (newDep <= nowTimelineMinutes() + 5) continue;
-      if (newDep <= start + 10) continue;
-      if (testConflict(flight, gate.id, newDep, start)) continue;
-      const gateDistance = currentGate ? Math.abs(gate.num - currentGate.num) : 0;
-      const score = Math.abs(offset) * 4 + gateDistance * 8 + (gate.concourse !== currentGate?.concourse ? 200 : 0) + (gate.id !== flight.gate ? 15 : 0);
-      out.push({ gate: gate.id, departure: newDep, offset, score });
-      break;
+  const seen = new Set();
+
+  function collectFromGates(gates, wrongAirlinePenalty) {
+    for (const gate of gates) {
+      // Search the ENTIRE remaining operating day in 15-minute steps. Do not
+      // stop at +120m; a conflict-free option 5 hours later is still valid.
+      for (let newStart = earliestStart; newStart <= latestStart; newStart += INTERVAL_MIN) {
+        const newEnd = newStart + duration;
+        if (newEnd <= nowTimelineMinutes() + 5) continue;
+        if (testConflict(flight, gate.id, newEnd, newStart)) continue;
+
+        const delay = Math.max(0, newEnd - originalWindow.end);
+        const key = `${gate.id}|${newStart}|${newEnd}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+
+        const gateChanged = gate.id !== flight.gate;
+        const score = delay * 100 + gatePreference(gate) + (gateChanged ? 10 : 0) + wrongAirlinePenalty;
+        out.push({
+          gate: gate.id,
+          gateStart: newStart,
+          departure: newEnd,
+          boarding: boardOffset === null ? null : newStart + Math.max(0, boardOffset),
+          delay,
+          offset: delay,
+          score,
+          wrongAirline: wrongAirlinePenalty > 0
+        });
+
+        // Keep multiple genuinely different choices from the same gate, but
+        // space them out so the list can include farther fallbacks too.
+        newStart += 45;
+        if (out.length >= 40) return;
+      }
+      if (out.length >= 40) return;
     }
   }
-  return out.sort((a, b) => a.score - b.score).slice(0, 6);
+
+  collectFromGates(compatible, 0);
+  if (out.length < 8) collectFromGates(fallback, 50000);
+
+  return out
+    .sort((a, b) => a.score - b.score)
+    .slice(0, 10);
 }
 
 
-function findAutoSolveCandidate(flight, maxDelayMinutes = 360) {
-  if (!flight || isDeparted(flight) || flight.status === 'CANCELLED' || flight.status === 'DIVERTED') return null;
-  const dep = toTimelineMinutes(flight.departure);
-  const start = gateStartMinutes(flight);
-  if (dep === null || start === null) return null;
+function autoSolveSchedule() {
+  const movable = FLIGHTS.filter(f =>
+    f.status !== 'CANCELLED' &&
+    f.status !== 'DIVERTED' &&
+    !isDeparted(f) &&
+    occupancyWindow(f)
+  );
 
-  const currentGate = GATE_BY_ID[flight.gate];
-  const compatible = GATE_LIST.filter(g => airlinesMatch(g.airline, effectiveAirline(flight)));
-  let best = null;
+  if (!movable.length) return { moved: 0, remaining: computeConflicts().size };
 
-  // Auto-solve is intentionally delay-only: it never moves a flight earlier.
-  for (let delay = INTERVAL_MIN; delay <= maxDelayMinutes; delay += INTERVAL_MIN) {
-    const newDep = dep + delay;
-    if (newDep >= TIMELINE_END_MIN) break;
+  // Build one availability calendar per gate. Departed flights are ignored;
+  // active/movable flights are rescheduled from scratch so the solver can
+  // actually untangle dense banks instead of making one overlap worse.
+  const gateBookings = new Map(GATE_LIST.map(g => [g.id, []]));
+
+  const original = new Map();
+  movable.forEach(f => {
+    const w = occupancyWindow(f);
+    original.set(f.id, {
+      gate: f.gate,
+      start: w.start,
+      end: w.end,
+      duration: Math.max(INTERVAL_MIN, w.end - w.start),
+      departure: f.departure,
+      gateStart: f.gateStart,
+    });
+  });
+
+  // Earlier flights get first choice. This keeps the schedule stable and
+  // pushes congestion later instead of wildly rearranging the whole day.
+  movable.sort((a, b) => {
+    const aw = original.get(a.id), bw = original.get(b.id);
+    return (aw?.start ?? Infinity) - (bw?.start ?? Infinity);
+  });
+
+  const placements = new Map();
+  const searchEnd = TIMELINE_END_MIN; // 5:00 AM next day with current config
+
+  function earliestSlot(bookings, desiredStart, duration) {
+    let candidate = Math.max(desiredStart, nowTimelineMinutes());
+    candidate = Math.ceil(candidate / INTERVAL_MIN) * INTERVAL_MIN;
+
+    const sorted = [...bookings].sort((a, b) => a.start - b.start);
+    for (const b of sorted) {
+      if (candidate + duration <= b.start) break;
+      if (candidate < b.end && candidate + duration > b.start) {
+        candidate = Math.ceil(b.end / INTERVAL_MIN) * INTERVAL_MIN;
+      }
+    }
+    return candidate;
+  }
+
+  for (const flight of movable) {
+    const o = original.get(flight.id);
+    const compatible = GATE_LIST.filter(g => airlinesMatch(g.airline, effectiveAirline(flight)));
+    const currentGate = GATE_BY_ID[o.gate];
+    let best = null;
 
     for (const gate of compatible) {
-      if (testConflict(flight, gate.id, newDep, start)) continue;
+      const bookings = gateBookings.get(gate.id) || [];
+      const start = earliestSlot(bookings, o.start, o.duration);
+      const end = start + o.duration;
+      if (end > searchEnd) continue;
+
+      const delay = Math.max(0, end - o.end);
       const gateDistance = currentGate ? Math.abs(gate.num - currentGate.num) : 0;
-      const concoursePenalty = currentGate && gate.concourse !== currentGate.concourse ? 250 : 0;
-      const gateChangePenalty = gate.id === flight.gate ? 0 : 20;
-      const score = delay * 10 + gateDistance * 5 + concoursePenalty + gateChangePenalty;
-      const candidate = { flight, gate: gate.id, departure: newDep, delay, score };
-      if (!best || candidate.score < best.score) best = candidate;
+      const concoursePenalty = currentGate && gate.concourse !== currentGate.concourse ? 120 : 0;
+      const gateChangePenalty = gate.id === o.gate ? 0 : 10;
+      const score = delay * 100 + concoursePenalty + gateDistance * 2 + gateChangePenalty;
+
+      if (!best || score < best.score) best = { gate: gate.id, start, end, delay, score };
     }
 
-    // Once we found something at this delay amount, don't consider larger
-    // delays unless they were needed to get any solution at all.
-    if (best) break;
+    // If the airline's own gates are completely saturated, fall back to ANY
+    // physical gate. The user explicitly asked the one-click solver to make
+    // everything fit; wrong-airline placement is preferable to leaving 100+
+    // unresolved conflicts. Those moves remain visually flagged.
+    if (!best) {
+      for (const gate of GATE_LIST) {
+        const bookings = gateBookings.get(gate.id) || [];
+        const start = earliestSlot(bookings, o.start, o.duration);
+        const end = start + o.duration;
+        if (end > searchEnd) continue;
+        const delay = Math.max(0, end - o.end);
+        const gateDistance = currentGate && gate.concourse === currentGate.concourse ? Math.abs(gate.num - currentGate.num) : 50;
+        const score = delay * 100 + 10000 + gateDistance;
+        if (!best || score < best.score) best = { gate: gate.id, start, end, delay, score };
+      }
+    }
+
+    if (!best) continue;
+    placements.set(flight.id, best);
+    gateBookings.get(best.gate).push({ start: best.start, end: best.end, flightId: flight.id });
   }
-  return best;
-}
 
-function applyAutoSolveCandidate(candidate) {
-  if (!candidate) return false;
-  const { flight, gate, departure, delay } = candidate;
-  const oldGate = flight.gate;
-  const oldDeparture = flight.departure;
+  let moved = 0;
+  for (const flight of movable) {
+    const place = placements.get(flight.id);
+    const o = original.get(flight.id);
+    if (!place || !o) continue;
 
-  flight.gate = gate;
-  flight.departure = minutesToClockString(departure);
-  markDelayedForTimeChange(flight, 'automatic conflict resolution');
-  if (!flight.delayTag) flight.delayTag = 'DELAY';
+    const gateChanged = place.gate !== o.gate;
+    const timeChanged = place.start !== o.start || place.end !== o.end;
+    if (!gateChanged && !timeChanged) continue;
 
-  logActivity(
-    `AUTO SOLVE: ${flight.flightNumber} ${oldGate} → ${gate}, ${displayClockTime(oldDeparture)} → ${displayClockTime(flight.departure)} (+${delay}m)`,
-    'AUTOSOLVE',
-    flight.id
-  );
-  queueFlightSync(flight);
-  return true;
+    flight.gate = place.gate;
+    flight.gateStart = minutesToClockString(place.start);
+    flight.departure = minutesToClockString(place.end);
+
+    // Keep the boarding offset tied to the shifted occupancy window when
+    // possible, rather than leaving boarding behind at the old clock time.
+    const oldBoard = toTimelineMinutes(flight.boarding);
+    if (oldBoard !== null) {
+      const boardOffset = oldBoard - o.start;
+      flight.boarding = minutesToClockString(place.start + Math.max(0, boardOffset));
+    }
+
+    if (timeChanged) {
+      flight.status = 'DELAYED';
+      flight.delayTag = 'DELAY';
+      const delayMinutes = Math.max(0, place.end - o.end);
+      flight.comments = flight.comments || 'Automatic gate conflict resolution';
+      logActivity(
+        `AUTO SOLVE: ${flight.flightNumber} ${o.gate} → ${place.gate}, ${displayClockTime(o.departure)} → ${displayClockTime(flight.departure)}${delayMinutes ? ` (+${delayMinutes}m)` : ''}`,
+        'AUTOSOLVE',
+        flight.id
+      );
+    } else {
+      logActivity(`AUTO SOLVE: ${flight.flightNumber} gate ${o.gate} → ${place.gate}`, 'AUTOSOLVE', flight.id);
+    }
+
+    queueFlightSync(flight);
+    moved++;
+  }
+
+  return { moved, remaining: computeConflicts().size };
 }
 
 function autoSolveAllConflicts() {
   const button = document.getElementById('autoSolveBtn');
   if (button) { button.disabled = true; button.textContent = 'Solving…'; }
 
-  let solvedMoves = 0;
-  let guard = 0;
-  const maxIterations = Math.max(100, FLIGHTS.length * 4);
+  const before = computeConflicts().size;
+  const result = autoSolveSchedule();
+  const remaining = computeConflicts().size;
 
-  while (guard++ < maxIterations) {
-    const conflicts = computeConflicts();
-    if (!conflicts.size) break;
-
-    const [laterId, blockerId] = conflicts.entries().next().value;
-    const later = FLIGHTS.find(f => f.id === laterId);
-    const blocker = FLIGHTS.find(f => f.id === blockerId);
-
-    // We are allowed to move either aircraft. Pick whichever can be fixed
-    // with the smallest delay / gate disruption.
-    const options = [findAutoSolveCandidate(later), findAutoSolveCandidate(blocker)].filter(Boolean);
-    if (!options.length) {
-      // Try a wider search before giving up on this conflict.
-      const wideOptions = [findAutoSolveCandidate(later, 720), findAutoSolveCandidate(blocker, 720)].filter(Boolean);
-      if (!wideOptions.length) break;
-      wideOptions.sort((a, b) => a.score - b.score);
-      applyAutoSolveCandidate(wideOptions[0]);
-    } else {
-      options.sort((a, b) => a.score - b.score);
-      applyAutoSolveCandidate(options[0]);
-    }
-    solvedMoves++;
-  }
-
-  const remaining = computeConflicts();
-  if (remaining.size === 0) {
-    logActivity(`AUTO SOLVE complete: ${solvedMoves} flight${solvedMoves === 1 ? '' : 's'} adjusted; no gate conflicts remain.`, 'AUTOSOLVE');
+  if (remaining === 0) {
+    logActivity(`AUTO SOLVE complete: ${result.moved} flight${result.moved === 1 ? '' : 's'} repositioned; ${before} conflict${before === 1 ? '' : 's'} cleared.`, 'AUTOSOLVE');
   } else {
-    logActivity(`AUTO SOLVE stopped after ${solvedMoves} adjustment${solvedMoves === 1 ? '' : 's'}; ${remaining.size} conflict${remaining.size === 1 ? '' : 's'} still need manual attention.`, 'CONFLICT');
+    logActivity(`AUTO SOLVE moved ${result.moved} flight${result.moved === 1 ? '' : 's'}; ${remaining} conflict${remaining === 1 ? '' : 's'} remain because the visible 5 AM–5 AM operating window has no additional physical gate space.`, 'CONFLICT');
   }
-  renderBoard();
 
-  if (button) { button.disabled = remaining.size === 0; button.textContent = 'Auto Solve'; }
+  renderBoard();
+  persistOperationalState();
+  if (button) { button.disabled = remaining === 0; button.textContent = 'Auto Solve'; }
 }
 
 function escapeHtml(str) {
@@ -698,6 +805,7 @@ function openFlightModal(flightId) {
   document.getElementById('deleteFlightBtn').classList.toggle('hidden', !isEdit);
   document.getElementById('quickActions').classList.toggle('hidden', !isEdit);
   document.getElementById('f_id').value = isEdit ? flight.id : '';
+  delete document.getElementById('f_id').dataset.suggestedGateStart;
   document.getElementById('f_airline').value = isEdit ? flight.airline : CONFIG.GATE_MAP[0].airline;
   document.getElementById('f_flightnum').value = isEdit ? flight.flightNumber : '';
   document.getElementById('f_to').value = isEdit ? flight.to : '';
@@ -716,15 +824,25 @@ function openFlightModal(flightId) {
 function renderResolutionSuggestions(flight, box) {
   const suggestions = suggestResolutionsFor(flight);
   box.classList.remove('hidden');
-  if (!suggestions.length) { box.innerHTML = '<strong>No small automatic fix found.</strong> You can still resize the block or choose a gate manually.'; return; }
-  box.innerHTML = `<strong>Minimal-change conflict fixes:</strong><div class="resolution-list">${suggestions.map((s, i) => {
-    const timeText = s.offset === 0 ? 'keep current time' : `${s.offset > 0 ? '+' : ''}${s.offset} min → ${minutesToClockString(s.departure)}`;
+  if (!suggestions.length) {
+    box.innerHTML = '<strong>No conflict-free opening exists before 5:00 AM.</strong> Auto Solve may need to move other flights first.';
+    return;
+  }
+  box.innerHTML = `<strong>Conflict-free reschedule options:</strong><div class="resolution-list">${suggestions.map((s, i) => {
+    const hours = Math.floor(s.delay / 60);
+    const mins = s.delay % 60;
+    const delayText = s.delay === 0 ? 'no delay' : `+${hours ? `${hours}h ` : ''}${mins ? `${mins}m` : ''}`.trim();
+    const ownership = s.wrongAirline ? ' · other-airline gate' : '';
+    const timeText = `${delayText} · ${minutesToClockString(s.gateStart)}–${minutesToClockString(s.departure)}${ownership}`;
     return `<button type="button" class="resolution-option" data-i="${i}"><span>${escapeHtml(s.gate)}</span><small>${escapeHtml(timeText)}</small></button>`;
   }).join('')}</div>`;
+
   box.querySelectorAll('.resolution-option').forEach(btn => btn.addEventListener('click', () => {
     const s = suggestions[Number(btn.dataset.i)];
     document.getElementById('f_gate').value = s.gate;
     document.getElementById('f_departure').value = minutesToClockString(s.departure);
+    if (s.boarding !== null) document.getElementById('f_boarding').value = minutesToClockString(s.boarding);
+    document.getElementById('f_id').dataset.suggestedGateStart = minutesToClockString(s.gateStart);
   }));
 }
 
@@ -745,7 +863,7 @@ document.getElementById('flightForm').addEventListener('submit', e => {
     status: document.getElementById('f_status').value,
     comments: document.getElementById('f_comments').value.trim(),
     delayTag: document.getElementById('f_delaytag').value,
-    gateStart: existing ? existing.gateStart : '',
+    gateStart: existing ? (document.getElementById('f_id').dataset.suggestedGateStart || existing.gateStart) : '',
     base: existing ? existing.base : null,
     ops: existing ? existing.ops : null,
   };
@@ -1008,8 +1126,15 @@ function spawnRandomEvent() {
   } else if (r < 0.72) {
     const f = randomFutureFlight(90);
     if (f) { f.status = 'DIVERTED'; f.delayTag = 'OTHER'; logActivity(`Random event: ${f.flightNumber} diverted`, 'DIVERT', f.id); queueFlightSync(f); happened = true; }
-  } else if (r < 0.81) {
-    issueGroundStop([15,20,30,45,60][Math.floor(Math.random()*5)], 'random event'); happened = true;
+  } else if (r < 0.728) {
+    // Ground stops are intentionally rare. Do not issue one while another
+    // is active or within the configured cooldown window.
+    const cooldownMs = (CONFIG.GROUND_STOP_COOLDOWN_MINUTES || 90) * 60000;
+    if (!GROUND_STOP && Date.now() - GROUND_STOP_LAST_ISSUED_AT >= cooldownMs) {
+      issueGroundStop([15,20,30,45][Math.floor(Math.random()*4)], 'rare random event');
+      GROUND_STOP_LAST_ISSUED_AT = Date.now();
+      happened = true;
+    }
   } else if (r < 0.91) {
     WEATHER = Math.random() < .72 ? 'STORM' : 'WINDY';
     WEATHER_LAST_HOUR_KEY = null;
@@ -1079,7 +1204,7 @@ function collectCarryovers() {
 
 async function resetSimulation(reason, preserveCarryovers) {
   clearPersistedOperationalState();
-  WEATHER = 'CLEAR'; WEATHER_LAST_HOUR_KEY = null; GROUND_STOP = null; nextRandomEventAt = null;
+  WEATHER = 'CLEAR'; WEATHER_LAST_HOUR_KEY = null; GROUND_STOP = null; GROUND_STOP_LAST_ISSUED_AT = 0; nextRandomEventAt = null;
   HISTORY = []; unreadEventCount = 0;
   document.getElementById('weatherSelect').value = 'CLEAR'; updateGroundStopStatus();
   const carryovers = preserveCarryovers ? collectCarryovers() : [];
