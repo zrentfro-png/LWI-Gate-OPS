@@ -1848,7 +1848,9 @@ function createRandomFlight() {
 
   FLIGHTS.push(flight);
   logActivity(`Inbound diversion accepted: ${flight.flightNumber} assigned ${flight.gate} with no scheduled flights displaced`, 'DIVERT', id);
-  queueFlightSync(flight);
+  // Simulation-only diversion: persist in browser operational state, never write it
+  // into the authoritative recurring Google Sheet schedule.
+  persistOperationalState();
   return true;
 }
 
@@ -2010,6 +2012,9 @@ async function loadFromSheet() {
 
 function queueFlightSync(flight) {
   persistOperationalState();
+  // Random inbound diversions are simulation-only. They survive reload through
+  // operational state, but must never become rows in the recurring Google Sheet.
+  if (String(flight?.id || '').startsWith('sim_') || flight?.ops?.inboundDiversion) return;
   if (!SHEET_URL) return;
   syncQueue.set(flight.id, flightToRow(flight));
   clearTimeout(syncTimer); syncTimer = setTimeout(flushSyncQueue, 500);
