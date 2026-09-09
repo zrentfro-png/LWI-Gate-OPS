@@ -489,6 +489,20 @@ function getConflictPairs() {
   return pairs;
 }
 
+function getConflictFlightIds(pairs = getConflictPairs()) {
+  const ids = new Set();
+  for (const [a, b] of pairs) {
+    if (a?.id) ids.add(a.id);
+    if (b?.id) ids.add(b.id);
+  }
+  return ids;
+}
+
+function flightHasConflict(flightId) {
+  if (!flightId) return false;
+  return getConflictFlightIds().has(flightId);
+}
+
 function buildConflictComponents(pairs) {
   const graph = new Map();
   for (const [a, b] of pairs) {
@@ -787,8 +801,10 @@ function renderBoard() {
   normalizeFlightCollection();
   const board = document.getElementById('board');
   board.innerHTML = '';
+  const conflictPairs = getConflictPairs();
+  const conflictIds = getConflictFlightIds(conflictPairs);
   const conflicts = computeConflicts();
-  updateConflictBanner(conflicts);
+  updateConflictBanner(conflicts, conflictPairs.length, conflictIds.size);
   const scrollArea = document.createElement('div');
   scrollArea.className = 'timeline-scroll';
 
@@ -815,12 +831,12 @@ function renderBoard() {
       const flightsHere = FLIGHTS.filter(f => f.gate === gate.id && flightMatchesFilters(f));
       const rowNeedsExtraHeight = flightsHere.some(f => {
         const o = ensureOps(f);
-        return (o.taxiRequested && !o.taxiApproved) || (o.pushbackRequested && !o.pushbackApproved) || conflicts.has(f.id);
+        return (o.taxiRequested && !o.taxiApproved) || (o.pushbackRequested && !o.pushbackApproved) || conflictIds.has(f.id);
       });
       if (rowNeedsExtraHeight) row.classList.add('timeline-row-expanded');
 
       flightsHere.forEach(f => {
-        const win = occupancyWindow(f); const card = renderFlightCard(f, conflicts.has(f.id));
+        const win = occupancyWindow(f); const card = renderFlightCard(f, conflictIds.has(f.id));
         if (win) {
           const left = Math.max(0, minutesToX(win.start));
           const width = Math.max(40, minutesToX(win.end) - minutesToX(win.start));
@@ -895,13 +911,15 @@ function handleGateDrop(flightId, newGate, gateOwner) {
   queueFlightSync(flight); renderBoard();
 }
 
-function updateConflictBanner(conflicts) {
+function updateConflictBanner(conflicts, pairCount = null, conflictedFlightCount = null) {
   const banner = document.getElementById('conflictBanner');
   const autoBtn = document.getElementById('autoSolveBtn');
   if (autoBtn) autoBtn.disabled = conflicts.size === 0;
   if (!conflicts.size) { banner.classList.add('hidden'); return; }
   banner.classList.remove('hidden');
-  banner.textContent = `⚠ ${conflicts.size} gate conflict${conflicts.size > 1 ? 's' : ''} — use Auto Solve or click a conflicted flight for manual minimal-change solutions.`;
+  const pairs = pairCount ?? getConflictPairs().length;
+  const flights = conflictedFlightCount ?? getConflictFlightIds().size;
+  banner.textContent = `⚠ ${pairs} gate overlap${pairs === 1 ? '' : 's'} involving ${flights} flight${flights === 1 ? '' : 's'} — use Auto Solve or click any marked flight for conflict-free solutions.`;
 }
 
 function populateAirlineOptions() {
@@ -931,7 +949,7 @@ function openFlightModal(flightId) {
   document.getElementById('f_comments').value = isEdit ? flight.comments : '';
 
   const box = document.getElementById('suggestBox'); box.classList.add('hidden'); box.innerHTML = '';
-  if (isEdit && computeConflicts().has(flight.id)) renderResolutionSuggestions(flight, box);
+  if (isEdit && flightHasConflict(flight.id)) renderResolutionSuggestions(flight, box);
   document.getElementById('flightModal').classList.remove('hidden');
 }
 
