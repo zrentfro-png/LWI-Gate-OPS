@@ -9,161 +9,135 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-
-  <header class="topbar">
-    <div class="topbar-left">
-      <span class="brand-mark">GATE OPS</span>
-      <span id="clock" class="clock">--:--:--</span>
-    </div>
-    <div class="topbar-mid">
-      <input id="searchBox" type="text" placeholder="Search flight, gate, or destination" />
-      <select id="statusFilter">
-        <option value="all">All statuses</option>
-        <option value="ON TIME">On time</option>
-        <option value="DELAYED">Delayed</option>
-        <option value="BOARDING">Boarding</option>
-        <option value="CANCELLED">Cancelled</option>
-        <option value="DIVERTED">Diverted</option>
-      </select>
-    </div>
-    <div class="topbar-right">
-      <span id="syncStatus" class="sync-status sync-offline">● Local data (not synced)</span>
-      <button id="syncBtn" class="btn btn-ghost">Connect Sheet</button>
-      <button id="historyBtn" class="btn btn-ghost">History</button>
-      <button id="settingsBtn" class="btn btn-ghost">Settings</button>
-      <button id="addFlightBtn" class="btn btn-primary">+ Add Flight</button>
-    </div>
-  </header>
-
-  <div id="conflictBanner" class="conflict-banner hidden"></div>
-
-  <main id="board" class="board">
-    <!-- concourse columns injected by app.js -->
-  </main>
-
-  <!-- Flight edit / add modal -->
-  <div id="flightModal" class="modal-overlay hidden">
-    <div class="modal">
-      <div class="modal-header">
-        <h2 id="modalTitle">Add Flight</h2>
-        <button id="modalClose" class="modal-close">&times;</button>
-      </div>
-      <form id="flightForm" class="modal-body">
-        <input type="hidden" id="f_id" />
-        <label>Airline
-          <select id="f_airline" required></select>
-        </label>
-        <label>Flight number
-          <input id="f_flightnum" type="text" placeholder="UA 1842" required />
-        </label>
-        <label>To (destination)
-          <input id="f_to" type="text" placeholder="DEN" required />
-        </label>
-        <label>Gate
-          <input id="f_gate" type="text" placeholder="A14" required list="gateList" />
-          <datalist id="gateList"></datalist>
-        </label>
-        <label>Boarding time
-          <input id="f_boarding" type="text" placeholder="e.g. 08:10 or 8:10 AM" required />
-        </label>
-        <label>Departure time
-          <input id="f_departure" type="text" placeholder="e.g. 08:40 or 8:40 AM" required />
-        </label>
-        <label>Status
-          <select id="f_status">
-            <option>ON TIME</option>
-            <option>DELAYED</option>
-            <option>BOARDING</option>
-            <option>CANCELLED</option>
-            <option>DIVERTED</option>
-          </select>
-        </label>
-        <label>Comments
-          <textarea id="f_comments" rows="2" placeholder="Aircraft swap, mechanical, etc."></textarea>
-        </label>
-        <div id="suggestBox" class="suggest-box hidden"></div>
-        <div id="quickActions" class="quick-actions hidden">
-          <div class="quick-actions-label">Quick actions (not saved to sheet — session only)</div>
-          <div class="quick-actions-row">
-            <button type="button" class="btn btn-ghost btn-sm" data-action="delay15">Delay +15m</button>
-            <button type="button" class="btn btn-ghost btn-sm" data-action="delay30">Delay +30m</button>
-            <button type="button" class="btn btn-ghost btn-sm" data-action="cancel">Cancel Flight</button>
-            <button type="button" class="btn btn-ghost btn-sm" data-action="divert">Divert</button>
-            <button type="button" class="btn btn-ghost btn-sm" data-action="returnToGate">Return to Normal</button>
-          </div>
-        </div>
-        <div class="modal-actions">
-          <button type="button" id="deleteFlightBtn" class="btn btn-danger-ghost hidden">Remove flight</button>
-          <div class="modal-actions-right">
-            <button type="button" id="modalCancel" class="btn btn-ghost">Cancel</button>
-            <button type="submit" class="btn btn-primary">Save flight</button>
-          </div>
-        </div>
-      </form>
-    </div>
+<header class="topbar">
+  <div class="topbar-left">
+    <span class="brand-mark">GATE OPS</span>
+    <span id="clock" class="clock">--:--:--</span>
   </div>
+  <div class="topbar-mid">
+    <input id="searchBox" type="text" placeholder="Search flight, gate, or destination" />
+    <select id="statusFilter">
+      <option value="all">All statuses</option>
+      <option value="ON TIME">On time</option>
+      <option value="DELAYED">Delayed</option>
+      <option value="BOARDING">Boarding</option>
+      <option value="CANCELLED">Cancelled</option>
+      <option value="DIVERTED">Diverted</option>
+    </select>
+  </div>
+  <div class="topbar-right">
+    <span id="syncStatus" class="sync-status sync-offline">● Local data</span>
+    <button id="syncBtn" class="btn btn-ghost">Connect Sheet</button>
+    <button id="historyBtn" class="btn btn-ghost activity-btn">Activity <span id="activityBadge" class="activity-badge hidden">0</span></button>
+    <button id="settingsBtn" class="btn btn-ghost">Conditions</button>
+    <button id="addFlightBtn" class="btn btn-primary">+ Add Flight</button>
+  </div>
+</header>
 
-  <!-- Sheet connect modal -->
-  <div id="sheetModal" class="modal-overlay hidden">
-    <div class="modal">
-      <div class="modal-header">
-        <h2>Connect Google Sheet</h2>
-        <button id="sheetModalClose" class="modal-close">&times;</button>
-      </div>
-      <div class="modal-body">
-        <p class="modal-help">Paste the Apps Script Web App URL from your deployment (see README for setup steps). Once connected, gate drags and edits write straight back to your "flights" tab.</p>
-        <label>Web App URL
-          <input id="sheetUrlInput" type="text" placeholder="https://script.google.com/macros/s/XXXX/exec" />
-        </label>
-        <div class="modal-actions">
-          <div class="modal-actions-right">
-            <button type="button" id="sheetModalCancel" class="btn btn-ghost">Cancel</button>
-            <button type="button" id="sheetModalSave" class="btn btn-primary">Connect & load</button>
-          </div>
+<div id="conflictBanner" class="conflict-banner hidden"></div>
+<main id="board" class="board"></main>
+
+<div id="flightModal" class="modal-overlay hidden">
+  <div class="modal">
+    <div class="modal-header">
+      <h2 id="modalTitle">Add Flight</h2>
+      <button id="modalClose" class="modal-close">&times;</button>
+    </div>
+    <form id="flightForm" class="modal-body">
+      <input type="hidden" id="f_id" />
+      <label>Airline<select id="f_airline" required></select></label>
+      <label>Flight number<input id="f_flightnum" type="text" placeholder="UA 1842" required /></label>
+      <label>To (destination)<input id="f_to" type="text" placeholder="DEN" required /></label>
+      <label>Gate<input id="f_gate" type="text" placeholder="A14" required list="gateList" /><datalist id="gateList"></datalist></label>
+      <label>Boarding time<input id="f_boarding" type="text" placeholder="8:10 AM" required /></label>
+      <label>Departure time<input id="f_departure" type="text" placeholder="8:40 AM" required /></label>
+      <label>Status
+        <select id="f_status">
+          <option>ON TIME</option><option>DELAYED</option><option>BOARDING</option><option>CANCELLED</option><option>DIVERTED</option>
+        </select>
+      </label>
+      <label>Delay / event tag
+        <select id="f_delaytag">
+          <option value="">None</option>
+          <option value="DELAY">Delay</option>
+          <option value="WEATHER">Weather</option>
+          <option value="GROUND STOP">Ground Stop</option>
+          <option value="LATE ARRIVING AIRCRAFT">Late Arriving Aircraft</option>
+          <option value="CREW HOLD">Crew Hold</option>
+          <option value="OTHER">Other</option>
+        </select>
+      </label>
+      <label>Comments<textarea id="f_comments" rows="2" placeholder="Aircraft swap, mechanical, etc."></textarea></label>
+
+      <div id="suggestBox" class="suggest-box hidden"></div>
+
+      <div id="quickActions" class="quick-actions hidden">
+        <div class="quick-actions-label">Operational actions — these sync to the live sheet and reset with the operational day.</div>
+        <div class="quick-actions-row">
+          <button type="button" class="btn btn-ghost btn-sm" data-action="delay15">Delay +15m</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-action="delay30">Delay +30m</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-action="cancel">Cancel Flight</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-action="divert">Divert</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-action="normal">Return to Normal</button>
         </div>
       </div>
-    </div>
-  </div>
 
-  <!-- History panel -->
-  <div id="historyModal" class="modal-overlay hidden">
-    <div class="modal">
-      <div class="modal-header">
-        <h2>Activity History</h2>
-        <button id="historyModalClose" class="modal-close">&times;</button>
-      </div>
-      <div class="modal-body">
-        <p class="modal-help">Session-only log — clears on reload or the daily reset. Not saved anywhere.</p>
-        <div id="historyList" class="history-list"></div>
-      </div>
-    </div>
-  </div>
-
-  <!-- Settings panel -->
-  <div id="settingsModal" class="modal-overlay hidden">
-    <div class="modal">
-      <div class="modal-header">
-        <h2>Simulation Settings</h2>
-        <button id="settingsModalClose" class="modal-close">&times;</button>
-      </div>
-      <div class="modal-body">
-        <p class="modal-help">Weather and ground stops affect the live simulation only — never written to your sheet, and reset automatically at 5:00 AM or on reload.</p>
-        <label>Weather
-          <select id="weatherSelect">
-            <option value="CLEAR">Clear</option>
-            <option value="WINDY">Windy</option>
-            <option value="STORM">Storm — causes random delays</option>
-            <option value="GROUND_STOP">Ground Stop — holds all departures</option>
-          </select>
-        </label>
-        <div class="modal-actions">
-          <button type="button" id="resetSimBtn" class="btn btn-danger-ghost">Reset Simulation Now</button>
+      <div class="modal-actions">
+        <button type="button" id="deleteFlightBtn" class="btn btn-danger-ghost hidden">Remove flight</button>
+        <div class="modal-actions-right">
+          <button type="button" id="modalCancel" class="btn btn-ghost">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save flight</button>
         </div>
       </div>
+    </form>
+  </div>
+</div>
+
+<div id="sheetModal" class="modal-overlay hidden">
+  <div class="modal">
+    <div class="modal-header"><h2>Connect Google Sheet</h2><button id="sheetModalClose" class="modal-close">&times;</button></div>
+    <div class="modal-body">
+      <p class="modal-help">Use the deployed Apps Script Web App URL. The sheet is the live operational board; a hidden baseline copy is used for resets.</p>
+      <label>Web App URL<input id="sheetUrlInput" type="text" placeholder="https://script.google.com/macros/s/XXXX/exec" /></label>
+      <div class="modal-actions"><div class="modal-actions-right"><button type="button" id="sheetModalCancel" class="btn btn-ghost">Cancel</button><button type="button" id="sheetModalSave" class="btn btn-primary">Connect & load</button></div></div>
     </div>
   </div>
+</div>
 
-  <script src="config.js"></script>
-  <script src="app.js"></script>
+<div id="historyModal" class="modal-overlay hidden">
+  <div class="modal modal-wide">
+    <div class="modal-header"><h2>Activity Center</h2><button id="historyModalClose" class="modal-close">&times;</button></div>
+    <div class="modal-body">
+      <p class="modal-help">Taxi and pushback requests, approvals, weather, ground stops, delays, conflicts, cancellations, diversions, gate changes, and random events appear here.</p>
+      <div id="historyList" class="history-list"></div>
+    </div>
+  </div>
+</div>
+
+<div id="settingsModal" class="modal-overlay hidden">
+  <div class="modal">
+    <div class="modal-header"><h2>Airport Conditions</h2><button id="settingsModalClose" class="modal-close">&times;</button></div>
+    <div class="modal-body">
+      <label>Weather
+        <select id="weatherSelect">
+          <option value="CLEAR">Clear</option>
+          <option value="WINDY">Windy</option>
+          <option value="STORM">Thunderstorm</option>
+        </select>
+      </label>
+      <div class="condition-box">
+        <div class="condition-title">Ground stop</div>
+        <p class="modal-help">Only departures inside the stop window are automatically delayed.</p>
+        <label>Duration (minutes)<input id="groundStopMinutes" type="number" min="5" max="240" step="5" value="30" /></label>
+        <button type="button" id="issueGroundStopBtn" class="btn btn-ghost">Issue Ground Stop</button>
+        <div id="groundStopStatus" class="condition-status">No active ground stop</div>
+      </div>
+      <div class="modal-actions"><button type="button" id="resetSimBtn" class="btn btn-danger-ghost">Reset Simulation Now</button></div>
+    </div>
+  </div>
+</div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
 </body>
 </html>
