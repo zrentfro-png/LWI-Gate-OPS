@@ -148,6 +148,18 @@ html, body {
 .timeline-scroll {
   display: inline-block;
   min-width: 100%;
+  position: relative;
+}
+
+.now-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--danger);
+  z-index: 12;
+  pointer-events: none;
+  box-shadow: 0 0 6px rgba(229,72,77,0.6);
 }
 
 /* ---- Header row: corner + time ruler ---- */
@@ -303,6 +315,84 @@ html, body {
 .resize-right { right: 0; }
 .resize-handle:hover {
   background: rgba(62,123,250,0.35);
+}
+
+/* ---- Simulation UI ---- */
+
+.fc-event {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  background: rgba(245,185,66,0.15);
+  border: 1px solid var(--warn);
+  border-radius: 3px;
+  padding: 2px 5px;
+}
+.fc-event-label {
+  font-size: 10px;
+  color: var(--warn);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.fc-event-accept {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: none;
+  background: var(--warn);
+  color: #1a1200;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.fc-event-accept:hover { filter: brightness(1.1); }
+
+.quick-actions {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 10px;
+  background: var(--panel-raised);
+}
+.quick-actions-label {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-bottom: 8px;
+}
+.quick-actions-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.btn-sm { font-size: 12px; padding: 6px 10px; }
+
+.history-list {
+  max-height: 400px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.history-row {
+  display: flex;
+  gap: 10px;
+  font-size: 12px;
+  padding: 5px 4px;
+  border-bottom: 1px solid var(--line);
+}
+.history-time {
+  font-family: var(--font-mono);
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+.history-empty {
+  font-size: 12px;
+  color: var(--text-faint);
+  font-style: italic;
+  padding: 10px 0;
 }
 
 .flight-card.status-delayed {

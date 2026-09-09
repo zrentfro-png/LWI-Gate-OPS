@@ -13,6 +13,14 @@ const CONFIG = {
   INTERVAL_MINUTES: 15,      // width of each time column, in minutes
   COLUMN_WIDTH_PX: 60,       // pixel width of each 15-min column — widen if labels feel cramped
 
+  // ---- Live simulation settings (ephemeral — never written to the sheet) ----
+  SIM_TICK_SECONDS: 6,          // how often the simulation checks for new events / weather effects
+  EVENT_SPAWN_CHANCE: 0.35,     // chance per tick that a new ATC request spawns on an eligible flight
+  EVENT_RESPONSE_SECONDS: 25,   // how long you have to Accept before it auto-extends
+  EVENT_EXTEND_MINUTES: 15,     // how much the block grows if an event isn't accepted in time
+  STORM_DELAY_CHANCE: 0.12,     // per-tick chance an on-time flight gets weather-delayed during a storm
+  DAILY_RESET_HOUR: 5,          // operational day boundary — everything ephemeral resets at 5:00 AM
+
   // How many minutes before DEPARTURE TIME the aircraft is considered to
   // occupy the gate, used as a fallback when BOARDING TIME can't be read.
   // Also sets the minimum block length even when boarding is close to

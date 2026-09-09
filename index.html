@@ -29,6 +29,8 @@
     <div class="topbar-right">
       <span id="syncStatus" class="sync-status sync-offline">● Local data (not synced)</span>
       <button id="syncBtn" class="btn btn-ghost">Connect Sheet</button>
+      <button id="historyBtn" class="btn btn-ghost">History</button>
+      <button id="settingsBtn" class="btn btn-ghost">Settings</button>
       <button id="addFlightBtn" class="btn btn-primary">+ Add Flight</button>
     </div>
   </header>
@@ -80,6 +82,16 @@
           <textarea id="f_comments" rows="2" placeholder="Aircraft swap, mechanical, etc."></textarea>
         </label>
         <div id="suggestBox" class="suggest-box hidden"></div>
+        <div id="quickActions" class="quick-actions hidden">
+          <div class="quick-actions-label">Quick actions (not saved to sheet — session only)</div>
+          <div class="quick-actions-row">
+            <button type="button" class="btn btn-ghost btn-sm" data-action="delay15">Delay +15m</button>
+            <button type="button" class="btn btn-ghost btn-sm" data-action="delay30">Delay +30m</button>
+            <button type="button" class="btn btn-ghost btn-sm" data-action="cancel">Cancel Flight</button>
+            <button type="button" class="btn btn-ghost btn-sm" data-action="divert">Divert</button>
+            <button type="button" class="btn btn-ghost btn-sm" data-action="returnToGate">Return to Normal</button>
+          </div>
+        </div>
         <div class="modal-actions">
           <button type="button" id="deleteFlightBtn" class="btn btn-danger-ghost hidden">Remove flight</button>
           <div class="modal-actions-right">
@@ -108,6 +120,44 @@
             <button type="button" id="sheetModalCancel" class="btn btn-ghost">Cancel</button>
             <button type="button" id="sheetModalSave" class="btn btn-primary">Connect & load</button>
           </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- History panel -->
+  <div id="historyModal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Activity History</h2>
+        <button id="historyModalClose" class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-help">Session-only log — clears on reload or the daily reset. Not saved anywhere.</p>
+        <div id="historyList" class="history-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings panel -->
+  <div id="settingsModal" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h2>Simulation Settings</h2>
+        <button id="settingsModalClose" class="modal-close">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p class="modal-help">Weather and ground stops affect the live simulation only — never written to your sheet, and reset automatically at 5:00 AM or on reload.</p>
+        <label>Weather
+          <select id="weatherSelect">
+            <option value="CLEAR">Clear</option>
+            <option value="WINDY">Windy</option>
+            <option value="STORM">Storm — causes random delays</option>
+            <option value="GROUND_STOP">Ground Stop — holds all departures</option>
+          </select>
+        </label>
+        <div class="modal-actions">
+          <button type="button" id="resetSimBtn" class="btn btn-danger-ghost">Reset Simulation Now</button>
         </div>
       </div>
     </div>
