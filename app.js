@@ -3,7 +3,7 @@
    ============================================================ */
 
 let FLIGHTS = [];
-let SHEET_URL = localStorage.getItem('gateops_sheet_url') || '';
+const SHEET_URL = 'https://script.google.com/macros/s/AKfycby9XfQI4dPTTHNPAoxeVWm0RLUMSeg6dl-H6iOOhPGAkjHODmseogl9h5RAxcRfYst6aA/exec';
 let searchTerm = '';
 let statusFilterVal = 'all';
 let WEATHER = 'CLEAR';
@@ -14,6 +14,9 @@ let operationalDayKey = getOperationalDayKey();
 let randomEventTimer = null;
 let syncQueue = new Map();
 let syncTimer = null;
+let unreadEventCount = 0;
+
+const EVENT_ACTIVITY_TYPES = new Set(['DELAY','CANCEL','DIVERT','WEATHER','GROUNDSTOP','AIRLINE','GATE','CREW','NEW','CONFLICT']);
 
 const DELAY_TAGS = ['DELAY', 'WEATHER', 'GROUND STOP', 'LATE ARRIVING AIRCRAFT', 'CREW HOLD', 'OTHER'];
 
@@ -52,8 +55,11 @@ function effectiveAirline(flight) {
 function logActivity(text, type = 'INFO', flightId = null, action = null) {
   HISTORY.unshift({ id: `h_${Date.now()}_${Math.random()}`, time: new Date(), text, type, flightId, action });
   if (HISTORY.length > 500) HISTORY.length = 500;
+  if (EVENT_ACTIVITY_TYPES.has(type)) unreadEventCount++;
   renderHistoryPanel();
+  renderEventsPanel();
   updateActivityBadge();
+  updateEventsBadge();
 }
 
 function pendingApprovalCount() {
@@ -69,6 +75,13 @@ function updateActivityBadge() {
   const n = pendingApprovalCount();
   badge.textContent = n;
   badge.classList.toggle('hidden', n === 0);
+}
+
+function updateEventsBadge() {
+  const badge = document.getElementById('eventsBadge');
+  if (!badge) return;
+  badge.textContent = unreadEventCount;
+  badge.classList.toggle('hidden', unreadEventCount === 0);
 }
 
 function buildGateList() {
@@ -824,9 +837,8 @@ async function resetSimulation(reason, preserveCarryovers) {
   if (!SHEET_URL) { FLIGHTS = CONFIG.SAMPLE_FLIGHTS.map(f => ({...f})); renderBoard(); return; }
   try {
     const params = new URLSearchParams({ action: 'reset', carryovers: JSON.stringify(carryovers) });
-    const res = await fetch(SHEET_URL + '?' + params.toString(), { cache: 'no-store' });
-    const data = await res.json();
-    if (!res.ok || data.error) throw new Error(data.error || 'Reset failed');
+    const data = await fetchSheetJson(SHEET_URL + '?' + params.toString());
+    if (data.error) throw new Error(data.error || 'Reset failed');
     FLIGHTS = (data.rows || []).map(rowToFlight); renderBoard();
   } catch (e) { console.error(e); alert('Could not reset the live sheet to the baseline schedule.'); }
 }
@@ -850,6 +862,24 @@ function renderHistoryPanel() {
   list.querySelectorAll('[data-approve-flight]').forEach(btn => btn.addEventListener('click', () => approveOperation(btn.dataset.approveFlight, btn.dataset.approveKind)));
 }
 
+function renderEventsPanel() {
+  const list = document.getElementById('eventsList');
+  if (!list) return;
+  const events = HISTORY.filter(h => EVENT_ACTIVITY_TYPES.has(h.type));
+  if (!events.length) {
+    list.innerHTML = '<div class="history-empty">No operational events yet. Taxi and pushback requests stay in Activity.</div>';
+    return;
+  }
+  list.innerHTML = events.map(h => `
+    <div class="event-row event-${h.type.toLowerCase()}">
+      <div class="event-row-top">
+        <span class="event-type">${escapeHtml(h.type)}</span>
+        <span class="history-time">${h.time.toLocaleTimeString([], {hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true})}</span>
+      </div>
+      <div class="event-text">${escapeHtml(h.text)}</div>
+    </div>`).join('');
+}
+
 function setSyncStatus(state, label) { const el = document.getElementById('syncStatus'); el.className = `sync-status sync-${state}`; el.textContent = label; }
 
 function rowToFlight(row) {
@@ -869,14 +899,28 @@ function flightToRow(f) {
   return { 'GATEOPS ID': f.id, 'AIRLINE': f.airline, 'FLIGHT NUMBER': f.flightNumber, 'TO:': f.to, 'GATE:': f.gate, 'BOARDING TIME:': f.boarding, 'DEPARTURE TIME:': f.departure, 'STATUS:': f.status, 'COMMENTS': f.comments, 'GATE BLOCK START:': f.gateStart || '', 'DELAY TAG:': f.delayTag || '' };
 }
 
+async function fetchSheetJson(url) {
+  const res = await fetch(url, { cache: 'no-store' });
+  const text = await res.text();
+  if (!res.ok) {
+    const looksHtml = /^\s*</.test(text);
+    throw new Error(`Sheet endpoint returned HTTP ${res.status}${looksHtml ? ' (HTML page instead of API JSON)' : ''}`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`Sheet endpoint did not return JSON${/^\s*</.test(text) ? ' (received an HTML page)' : ''}`);
+  }
+}
+
 async function loadFromSheet() {
   if (!SHEET_URL) return;
   setSyncStatus('offline', '● Connecting…');
   try {
-    const res = await fetch(SHEET_URL + '?action=list&_=' + Date.now(), { cache:'no-store' }); const data = await res.json();
-    if (!res.ok || data.error || !Array.isArray(data)) throw new Error(data.error || 'Load failed');
+    const data = await fetchSheetJson(SHEET_URL + '?action=list&_=' + Date.now());
+    if (data.error || !Array.isArray(data)) throw new Error(data.error || 'Load failed');
     FLIGHTS = data.map(rowToFlight); setSyncStatus('online', `● Synced (${new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',hour12:true})})`); renderBoard();
-  } catch (e) { console.error(e); setSyncStatus('error', '● Sheet connection failed'); }
+  } catch (e) { console.error(e); setSyncStatus('error', `● Sheet failed: ${e.message}`); }
 }
 
 function queueFlightSync(flight) {
@@ -891,8 +935,8 @@ async function flushSyncQueue() {
     try {
       setSyncStatus('online', '● Saving…');
       const params = new URLSearchParams({ action:'upsert', row:JSON.stringify(row) });
-      const res = await fetch(SHEET_URL + '?' + params.toString(), { cache:'no-store' }); const data = await res.json();
-      if (!res.ok || data.error) throw new Error(data.error || 'Save failed');
+      const data = await fetchSheetJson(SHEET_URL + '?' + params.toString());
+      if (data.error) throw new Error(data.error || 'Save failed');
     } catch (e) { console.error(e); setSyncStatus('error', '● Save failed'); }
   }
   if (SHEET_URL) setSyncStatus('online', `● Synced (${new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',hour12:true})})`);
@@ -900,12 +944,19 @@ async function flushSyncQueue() {
 
 async function deleteFlightFromSheet(id) {
   const params = new URLSearchParams({ action:'delete', id });
-  const res = await fetch(SHEET_URL + '?' + params.toString(), { cache:'no-store' }); const data = await res.json();
-  if (!res.ok || data.error) throw new Error(data.error || 'Delete failed');
+  const data = await fetchSheetJson(SHEET_URL + '?' + params.toString());
+  if (data.error) throw new Error(data.error || 'Delete failed');
 }
 
 document.getElementById('historyBtn').addEventListener('click', () => { renderHistoryPanel(); document.getElementById('historyModal').classList.remove('hidden'); });
 document.getElementById('historyModalClose').addEventListener('click', () => document.getElementById('historyModal').classList.add('hidden'));
+document.getElementById('eventsBtn').addEventListener('click', () => {
+  unreadEventCount = 0;
+  updateEventsBadge();
+  renderEventsPanel();
+  document.getElementById('eventsModal').classList.remove('hidden');
+});
+document.getElementById('eventsModalClose').addEventListener('click', () => document.getElementById('eventsModal').classList.add('hidden'));
 document.getElementById('settingsBtn').addEventListener('click', () => { document.getElementById('weatherSelect').value = WEATHER; updateGroundStopStatus(); document.getElementById('settingsModal').classList.remove('hidden'); });
 document.getElementById('settingsModalClose').addEventListener('click', () => document.getElementById('settingsModal').classList.add('hidden'));
 document.getElementById('weatherSelect').addEventListener('change', e => { WEATHER = e.target.value; WEATHER_LAST_HOUR_KEY = null; logActivity(`Weather set to ${WEATHER}`, 'WEATHER'); processWeatherHour(); scheduleNextRandomEvent(); renderBoard(); });
@@ -913,10 +964,7 @@ document.getElementById('issueGroundStopBtn').addEventListener('click', () => is
 document.getElementById('resetSimBtn').addEventListener('click', () => { if (confirm('Reset the live board back to the protected baseline schedule now?')) { resetSimulation('manual reset', false); document.getElementById('settingsModal').classList.add('hidden'); } });
 document.getElementById('searchBox').addEventListener('input', e => { searchTerm = e.target.value; renderBoard(); });
 document.getElementById('statusFilter').addEventListener('change', e => { statusFilterVal = e.target.value; renderBoard(); });
-document.getElementById('syncBtn').addEventListener('click', () => { document.getElementById('sheetUrlInput').value = SHEET_URL; document.getElementById('sheetModal').classList.remove('hidden'); });
-document.getElementById('sheetModalClose').addEventListener('click', () => document.getElementById('sheetModal').classList.add('hidden'));
-document.getElementById('sheetModalCancel').addEventListener('click', () => document.getElementById('sheetModal').classList.add('hidden'));
-document.getElementById('sheetModalSave').addEventListener('click', () => { SHEET_URL = document.getElementById('sheetUrlInput').value.trim(); localStorage.setItem('gateops_sheet_url', SHEET_URL); document.getElementById('sheetModal').classList.add('hidden'); loadFromSheet(); });
+document.getElementById('syncBtn').addEventListener('click', () => loadFromSheet());
 
 function tickClock() { document.getElementById('clock').textContent = new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true}); }
 

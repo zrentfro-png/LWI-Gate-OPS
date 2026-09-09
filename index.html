@@ -27,8 +27,9 @@
   </div>
   <div class="topbar-right">
     <span id="syncStatus" class="sync-status sync-offline">● Local data</span>
-    <button id="syncBtn" class="btn btn-ghost">Connect Sheet</button>
+    <button id="syncBtn" class="btn btn-ghost">Reload Sheet</button>
     <button id="historyBtn" class="btn btn-ghost activity-btn">Activity <span id="activityBadge" class="activity-badge hidden">0</span></button>
+    <button id="eventsBtn" class="btn btn-ghost activity-btn events-btn">Events <span id="eventsBadge" class="activity-badge hidden">0</span></button>
     <button id="settingsBtn" class="btn btn-ghost">Conditions</button>
     <button id="addFlightBtn" class="btn btn-primary">+ Add Flight</button>
   </div>
@@ -93,23 +94,22 @@
   </div>
 </div>
 
-<div id="sheetModal" class="modal-overlay hidden">
-  <div class="modal">
-    <div class="modal-header"><h2>Connect Google Sheet</h2><button id="sheetModalClose" class="modal-close">&times;</button></div>
-    <div class="modal-body">
-      <p class="modal-help">Use the deployed Apps Script Web App URL. The sheet is the live operational board; a hidden baseline copy is used for resets.</p>
-      <label>Web App URL<input id="sheetUrlInput" type="text" placeholder="https://script.google.com/macros/s/XXXX/exec" /></label>
-      <div class="modal-actions"><div class="modal-actions-right"><button type="button" id="sheetModalCancel" class="btn btn-ghost">Cancel</button><button type="button" id="sheetModalSave" class="btn btn-primary">Connect & load</button></div></div>
-    </div>
-  </div>
-</div>
-
 <div id="historyModal" class="modal-overlay hidden">
   <div class="modal modal-wide">
     <div class="modal-header"><h2>Activity Center</h2><button id="historyModalClose" class="modal-close">&times;</button></div>
     <div class="modal-body">
       <p class="modal-help">Taxi and pushback requests, approvals, weather, ground stops, delays, conflicts, cancellations, diversions, gate changes, and random events appear here.</p>
       <div id="historyList" class="history-list"></div>
+    </div>
+  </div>
+</div>
+
+<div id="eventsModal" class="modal-overlay hidden">
+  <div class="modal modal-wide">
+    <div class="modal-header"><h2>Events</h2><button id="eventsModalClose" class="modal-close">&times;</button></div>
+    <div class="modal-body">
+      <p class="modal-help">Operational surprises and disruptions live here: delays, airline disruptions, cancellations, diversions, weather, ground stops, gate problems, crew holds, conflicts, and added flights. Taxi/pushback requests remain in Activity.</p>
+      <div id="eventsList" class="events-list"></div>
     </div>
   </div>
 </div>
