@@ -2018,9 +2018,6 @@ function rowToFlight(row, index = 0) {
 function flightToRow(f) {
   return {
     'GATEOPS ID': String(f.sheetId || f.id || '').trim(),
-    'AIRLINE': f.airline,
-    'FLIGHT NUMBER': f.flightNumber,
-    'TO:': f.to,
     'GATE:': f.gate,
     'BOARDING TIME:': f.boarding,
     'DEPARTURE TIME:': f.departure,
@@ -2107,7 +2104,7 @@ function normalizeSyncValue(value) {
 
 function verifySavedRow(sent, returned) {
   if (!returned || typeof returned !== 'object') throw new Error('Backend did not return the updated Sheet row.');
-  const keys = ['GATEOPS ID', 'AIRLINE', 'FLIGHT NUMBER', 'TO:', 'GATE:', 'BOARDING TIME:', 'DEPARTURE TIME:', 'STATUS:', 'COMMENTS', 'GATE BLOCK START:', 'DELAY TAG:'];
+  const keys = ['GATE:', 'BOARDING TIME:', 'DEPARTURE TIME:', 'STATUS:', 'COMMENTS', 'GATE BLOCK START:', 'DELAY TAG:'];
   for (const key of keys) {
     if (normalizeSyncValue(sent[key]) !== normalizeSyncValue(returned[key])) {
       throw new Error(`Sheet verification failed for ${key}: sent "${sent[key] ?? ''}" but Sheet has "${returned[key] ?? ''}".`);
@@ -2117,30 +2114,46 @@ function verifySavedRow(sent, returned) {
 
 async function flushSyncQueue() {
   syncTimer = null;
-  const rows = [...syncQueue.values()]; syncQueue.clear();
+  const rows = [...syncQueue.values()];
+  syncQueue.clear();
   if (!rows.length) return;
 
+  setSyncStatus('online', `● Saving ${rows.length} change${rows.length === 1 ? '' : 's'}…`);
+
+  let updated = 0;
   let failed = 0;
   let lastError = '';
-  for (const row of rows) {
+
+  // Small batches keep Apps Script URLs safely under browser/proxy limits.
+  const batchSize = 12;
+  for (let i = 0; i < rows.length; i += batchSize) {
+    const batch = rows.slice(i, i + batchSize);
     try {
-      setSyncStatus('online', '● Saving…');
-      const params = new URLSearchParams({ action:'upsert', row:JSON.stringify(row), _:String(Date.now()) });
+      const params = new URLSearchParams({
+        action: 'bulkUpdate',
+        rows: JSON.stringify(batch),
+        _: String(Date.now())
+      });
       const data = await fetchSheetJson(SHEET_URL + '?' + params.toString());
-      if (data.error || !data.ok) throw new Error(data.error || 'Backend did not confirm the save.');
-      verifySavedRow(row, data.row);
+      if (data?.error || !data?.ok) throw new Error(data?.error || 'Bulk save failed.');
+      updated += Number(data.updated) || 0;
+      failed += Number(data.failed) || 0;
+      if (Array.isArray(data.errors) && data.errors.length) {
+        lastError = data.errors[data.errors.length - 1];
+      }
     } catch (e) {
-      failed++;
+      failed += batch.length;
       lastError = e?.message || String(e);
-      console.error('Sheet save failed:', e);
+      console.error('Bulk Sheet save failed:', e);
     }
   }
 
   if (failed) {
-    setSyncStatus('error', `● Save failed (${failed}) — ${lastError}`);
+    setSyncStatus('error', `● Saved ${updated}/${rows.length} · ${failed} failed${lastError ? ` — ${lastError}` : ''}`);
     return;
   }
-  setSyncStatus('online', `● Synced & verified (${new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',hour12:true})})`);
+
+  setSyncStatus('online', `● Synced ${updated} change${updated === 1 ? '' : 's'} (${new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',hour12:true})})`);
 }
 
 async function deleteFlightFromSheet(id) {

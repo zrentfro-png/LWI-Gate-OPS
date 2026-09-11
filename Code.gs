@@ -19,6 +19,14 @@ function doGet(e) {
       return jsonResponse({ ok: true, id, row: getRowById(id) });
     }
 
+    if (action === 'bulkUpdate') {
+      if (!e.parameter.rows) throw new Error('Missing rows data.');
+      const rows = JSON.parse(e.parameter.rows);
+      const result = bulkUpdateExistingRows(rows);
+      SpreadsheetApp.flush();
+      return jsonResponse({ ok: true, updated: result.updated, failed: result.failed, errors: result.errors });
+    }
+
     if (action === 'delete') {
       if (!e.parameter.id) throw new Error('Missing flight ID.');
       deleteRowById(e.parameter.id);
@@ -51,6 +59,11 @@ function doPost(e) {
       const id = upsertRow(body.row);
       SpreadsheetApp.flush();
       return jsonResponse({ ok: true, id, row: getRowById(id) });
+    }
+    if (body.action === 'bulkUpdate') {
+      const result = bulkUpdateExistingRows(body.rows || []);
+      SpreadsheetApp.flush();
+      return jsonResponse({ ok: true, updated: result.updated, failed: result.failed, errors: result.errors });
     }
     if (body.action === 'delete') {
       deleteRowById(body.id);
@@ -294,15 +307,111 @@ function upsertRow(rowObj) {
     throw new Error('Unknown GATEOPS ID "' + id + '". New flight rows are not allowed; only existing rows may be updated.');
   }
 
-  const isSyntheticRowId = /^row_\d+$/.test(id);
-  Object.keys(rowObj).forEach(header => {
-    if (header === ID_COLUMN && isSyntheticRowId) return; // never write row_N into the Sheet
+  const allowedHeaders = ['GATE:', 'BOARDING TIME:', 'DEPARTURE TIME:', 'STATUS:', 'COMMENTS', 'GATE BLOCK START:', 'DELAY TAG:'];
+  allowedHeaders.forEach(header => {
+    if (!Object.prototype.hasOwnProperty.call(rowObj, header)) return;
     const columnIndex = headers.indexOf(header);
     if (columnIndex === -1) return;
     sheet.getRange(rowIndex, columnIndex + 1).setValue(rowObj[header]);
   });
+
   return id;
 }
+
+function bulkUpdateExistingRows(rows) {
+  if (!Array.isArray(rows)) throw new Error('Invalid rows data.');
+
+  const sheet = getLiveSheet();
+  const headers = getHeaders(sheet);
+  const lastRow = sheet.getLastRow();
+  const lastCol = sheet.getLastColumn();
+  if (lastRow < 2) return { updated: 0, failed: 0, errors: [] };
+
+  const allowedHeaders = [
+    'GATE:',
+    'BOARDING TIME:',
+    'DEPARTURE TIME:',
+    'STATUS:',
+    'COMMENTS',
+    'GATE BLOCK START:',
+    'DELAY TAG:'
+  ];
+
+  const allowedIndexes = {};
+  allowedHeaders.forEach(header => {
+    const idx = headers.indexOf(header);
+    if (idx !== -1) allowedIndexes[header] = idx;
+  });
+
+  const allValues = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
+  const touchedRows = new Set();
+  let updated = 0;
+  let failed = 0;
+  const errors = [];
+
+  rows.forEach(rowObj => {
+    try {
+      if (!rowObj || typeof rowObj !== 'object') throw new Error('Invalid row data.');
+      const id = String(rowObj[ID_COLUMN] || rowObj.id || '').trim();
+      if (!id) throw new Error('Missing GATEOPS ID.');
+
+      const rowIndex = findRowIndexById(sheet, id);
+      if (rowIndex === -1) throw new Error('Unknown GATEOPS ID "' + id + '".');
+
+      const arrayIndex = rowIndex - 2;
+      Object.keys(allowedIndexes).forEach(header => {
+        if (!Object.prototype.hasOwnProperty.call(rowObj, header)) return;
+        allValues[arrayIndex][allowedIndexes[header]] = rowObj[header];
+      });
+
+      touchedRows.add(rowIndex);
+      updated++;
+    } catch (err) {
+      failed++;
+      if (errors.length < 10) errors.push(err && err.message ? err.message : String(err));
+    }
+  });
+
+  // Write only the operational columns, one column at a time, across touched row ranges.
+  // This avoids rewriting static roster/image/formula columns like AAAAIRLINE.
+  if (touchedRows.size) {
+    const sortedRows = Array.from(touchedRows).sort((a, b) => a - b);
+
+    Object.keys(allowedIndexes).forEach(header => {
+      const colIndex = allowedIndexes[header];
+      let rangeStart = null;
+      let previous = null;
+
+      function flushRange(startRow, endRow) {
+        if (startRow === null) return;
+        const values = [];
+        for (let rowNum = startRow; rowNum <= endRow; rowNum++) {
+          values.push([allValues[rowNum - 2][colIndex]]);
+        }
+        sheet.getRange(startRow, colIndex + 1, values.length, 1).setValues(values);
+      }
+
+      sortedRows.forEach(rowNum => {
+        if (rangeStart === null) {
+          rangeStart = rowNum;
+          previous = rowNum;
+          return;
+        }
+        if (rowNum === previous + 1) {
+          previous = rowNum;
+          return;
+        }
+        flushRange(rangeStart, previous);
+        rangeStart = rowNum;
+        previous = rowNum;
+      });
+      flushRange(rangeStart, previous);
+    });
+  }
+
+  return { updated, failed, errors };
+}
+
 
 function deleteRowById(id) {
   if (!id) throw new Error('Missing flight ID.');
