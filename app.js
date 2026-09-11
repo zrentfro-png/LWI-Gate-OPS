@@ -471,10 +471,11 @@ function forceFitEverythingNoDelays() {
   const gateIds = allPhysicalGateIds();
   if (!gateIds.length) throw new Error('No configured gates were found.');
 
-  const blockMinutes = Math.max(INTERVAL_MIN, Number(CONFIG.TURNAROUND_MINUTES) || 90);
+  const blockMinutes = Math.max(30, Number(CONFIG.TURNAROUND_MINUTES) || 90);
   const boardLead = 30;
 
-  // Build a totally fresh occupancy plan. We do NOT preserve stretched delay blocks.
+  // This is a schedule REPAIR, not a packing exercise. Preserve each flight's
+  // original minute whenever possible and solve conflicts with gates first.
   const flights = FLIGHTS
     .filter(f => {
       const id = String(f.sheetId || f.id || '').trim();
@@ -484,12 +485,18 @@ function forceFitEverythingNoDelays() {
       let desiredDep = toTimelineMinutes(f.departure);
       if (desiredDep === null) desiredDep = TIMELINE_START_MIN + blockMinutes;
       desiredDep = Math.max(TIMELINE_START_MIN + blockMinutes, Math.min(TIMELINE_END_MIN, desiredDep));
-      return { flight: f, index, desiredDep, desiredStart: desiredDep - blockMinutes };
+      return {
+        flight: f,
+        index,
+        desiredDep,
+        desiredStart: desiredDep - blockMinutes,
+        originalGate: f.gate
+      };
     })
-    .sort((a,b) => a.desiredStart - b.desiredStart || a.index - b.index);
+    .sort((a,b) => a.desiredDep - b.desiredDep || a.index - b.index);
 
-  // intervalsByGate contains only placements made by THIS solver.
   const intervalsByGate = Object.fromEntries(gateIds.map(id => [id, []]));
+  const departuresByMinute = new Map();
 
   function slotFree(gateId, start, end) {
     return intervalsByGate[gateId].every(w => !(start < w.end && w.start < end));
@@ -500,29 +507,69 @@ function forceFitEverythingNoDelays() {
     intervalsByGate[gateId].sort((a,b) => a.start - b.start);
   }
 
-  function orderedGates(flight) {
-    const compatible = gateIds.filter(id => {
+  function compatibleGateIds(flight) {
+    return gateIds.filter(id => {
       const gate = GATE_BY_ID[id];
       return gate && airlinesMatch(gate.airline, effectiveAirline(flight));
     });
-    const compatibleSet = new Set(compatible);
-    const others = gateIds.filter(id => !compatibleSet.has(id));
-    return [...compatible, ...others];
   }
 
-  // Search nearest to the flight's original time: same time, later, earlier, etc.
-  function candidateStarts(desiredStart) {
+  function orderedGates(item) {
+    const f = item.flight;
+    const compatible = compatibleGateIds(f);
+    const compatibleSet = new Set(compatible);
+    const others = gateIds.filter(id => !compatibleSet.has(id));
+
+    // Keep the existing gate first if it works, then nearby same-airline gates,
+    // then other physically open gates. This keeps the standard looking natural.
+    const gateNum = id => Number(String(id).replace(/^[A-Z]+/i,'')) || 999;
+    const sameConcourse = id => String(id).charAt(0) === String(item.originalGate || '').charAt(0);
+    const rank = id => {
+      let score = 0;
+      if (id === item.originalGate) score -= 10000;
+      if (!compatibleSet.has(id)) score += 5000;
+      if (!sameConcourse(id)) score += 500;
+      score += Math.abs(gateNum(id) - gateNum(item.originalGate));
+      return score;
+    };
+    return [...compatible, ...others].sort((a,b) => rank(a) - rank(b));
+  }
+
+  function departureLoad(depMinute, radius) {
+    let total = 0;
+    for (let m = depMinute - radius; m <= depMinute + radius; m++) {
+      total += departuresByMinute.get(m) || 0;
+    }
+    return total;
+  }
+
+  function departurePenalty(depMinute) {
+    const exact = departuresByMinute.get(depMinute) || 0;
+    const near5 = departureLoad(depMinute, 5);
+    const near15 = departureLoad(depMinute, 15);
+    const near30 = departureLoad(depMinute, 30);
+
+    // Strongly discourage unrealistic exact-time piles, while still allowing
+    // busy banks spread over a realistic 10-30 minute window.
+    return exact * 160 + near5 * 24 + near15 * 8 + near30 * 2;
+  }
+
+  function timeCandidates(item) {
+    const desired = item.desiredStart;
     const minStart = TIMELINE_START_MIN;
     const maxStart = TIMELINE_END_MIN - blockMinutes;
-    const clamped = Math.max(minStart, Math.min(maxStart, Math.round(desiredStart / INTERVAL_MIN) * INTERVAL_MIN));
-    const out = [clamped];
-    const maxSteps = Math.ceil((TIMELINE_END_MIN - TIMELINE_START_MIN) / INTERVAL_MIN);
-    for (let step = 1; step <= maxSteps; step++) {
-      const later = clamped + step * INTERVAL_MIN;
-      const earlier = clamped - step * INTERVAL_MIN;
+    const base = Math.max(minStart, Math.min(maxStart, desired));
+    const out = [];
+
+    // Exact original minute is always first. Then move in ONE-minute steps so
+    // the schedule never gets snapped into artificial :00/:15/:30/:45 banks.
+    out.push(base);
+    const maxShift = Math.max(base - minStart, maxStart - base);
+    for (let d = 1; d <= maxShift; d++) {
+      const later = base + d;
+      const earlier = base - d;
       if (later <= maxStart) out.push(later);
       if (earlier >= minStart) out.push(earlier);
-      if (later > maxStart && earlier < minStart) break;
     }
     return out;
   }
@@ -530,38 +577,54 @@ function forceFitEverythingNoDelays() {
   let movedGate = 0;
   let movedTime = 0;
   let placed = 0;
+  let maxTimeShift = 0;
 
   for (const item of flights) {
     const f = item.flight;
-    let placement = null;
-    const gates = orderedGates(f);
+    const gates = orderedGates(item);
+    let best = null;
 
-    for (const start of candidateStarts(item.desiredStart)) {
+    // Evaluate candidates by realism instead of first-available packing.
+    // Usually this selects the exact original minute on a different gate.
+    for (const start of timeCandidates(item)) {
       const end = start + blockMinutes;
-      for (const gateId of gates) {
-        if (slotFree(gateId, start, end)) {
-          placement = { gateId, start, end };
-          break;
+      const shift = Math.abs(end - item.desiredDep);
+
+      for (let gi = 0; gi < gates.length; gi++) {
+        const gateId = gates[gi];
+        if (!slotFree(gateId, start, end)) continue;
+
+        const gate = GATE_BY_ID[gateId];
+        const owned = gate && airlinesMatch(gate.airline, effectiveAirline(f));
+        const gatePenalty = gateId === item.originalGate ? 0 : (owned ? 12 : 90);
+        const score = shift * 1000 + departurePenalty(end) + gatePenalty + gi * 0.01;
+
+        if (!best || score < best.score) {
+          best = { gateId, start, end, score, shift };
         }
       }
-      if (placement) break;
+
+      // Once we've found a placement at the exact minute or within a very small
+      // shift, don't scan the entire day unless crowding/gates truly require it.
+      if (best && best.shift === 0) break;
+      if (best && shift > 20 && best.shift <= 5) break;
+      if (best && shift > 90 && best.shift <= 30) break;
     }
 
-    if (!placement) {
-      throw new Error(`Could not fit ${f.flightNumber || f.id} anywhere in the operational day.`);
-    }
+    if (!best) throw new Error(`Could not fit ${f.flightNumber || f.id} anywhere in the operational day.`);
 
     const oldGate = f.gate;
     const oldDep = toTimelineMinutes(f.departure);
-    if (oldGate !== placement.gateId) movedGate++;
-    if (oldDep === null || oldDep !== placement.end) movedTime++;
+    if (oldGate !== best.gateId) movedGate++;
+    if (oldDep === null || oldDep !== best.end) movedTime++;
+    maxTimeShift = Math.max(maxTimeShift, best.shift);
 
-    f.gate = placement.gateId;
-    f.gateStart = minutesToClockString(placement.start);
-    f.departure = minutesToClockString(placement.end);
-    f.boarding = minutesToClockString(Math.max(placement.start, placement.end - boardLead));
+    f.gate = best.gateId;
+    f.gateStart = minutesToClockString(best.start);
+    f.departure = minutesToClockString(best.end);
+    f.boarding = minutesToClockString(Math.max(best.start, best.end - boardLead));
 
-    // This is schedule construction, NOT an operational delay.
+    // Standard-schedule construction is not an operational disruption.
     f.status = 'ON TIME';
     f.delayTag = '';
     f.comments = '';
@@ -572,7 +635,8 @@ function forceFitEverythingNoDelays() {
     ops.pushbackRequested = false;
     ops.pushbackApproved = false;
 
-    addSlot(placement.gateId, placement.start, placement.end);
+    addSlot(best.gateId, best.start, best.end);
+    departuresByMinute.set(best.end, (departuresByMinute.get(best.end) || 0) + 1);
     queueFlightSync(f);
     placed++;
   }
@@ -581,13 +645,13 @@ function forceFitEverythingNoDelays() {
   persistOperationalState();
 
   const remaining = getAllDayGateConflictPairsNoDepartedFilter().length;
-  return { placed, movedGate, movedTime, remaining };
+  return { placed, movedGate, movedTime, remaining, maxTimeShift };
 }
 
 async function promoteCurrentLayoutToProtectedStandard() {
   if (!SHEET_URL) throw new Error('Sheet connection is not configured.');
 
-  setSyncStatus('online', '● Force-fitting entire schedule…');
+  setSyncStatus('online', '● Building realistic conflict-free schedule…');
   const result = forceFitEverythingNoDelays();
 
   if (result.remaining) {
@@ -606,7 +670,7 @@ async function promoteCurrentLayoutToProtectedStandard() {
   if (data?.error || !data?.ok) throw new Error(data?.error || 'Could not save new protected standard.');
 
   setSyncStatus('online', `● Conflict-free standard saved (${new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',hour12:true})})`);
-  logActivity(`Force-fit ${result.placed} flights into a conflict-free standard; ${result.movedGate} gate changes and ${result.movedTime} time changes, with no automatic delays.`, 'RESET');
+  logActivity(`Built realistic conflict-free standard for ${result.placed} flights; ${result.movedGate} gate changes, ${result.movedTime} time changes, max time shift ${result.maxTimeShift || 0} min, with no automatic delays.`, 'RESET');
   return result;
 }
 
@@ -2389,7 +2453,7 @@ if (cleanStandardBtn) {
     cleanStandardBtn.disabled = true;
     try {
       const result = await promoteCurrentLayoutToProtectedStandard();
-      alert(`Done. ${result.placed} flights were force-fit with 0 overlaps. ${result.movedGate} gate changes and ${result.movedTime} time changes were made. No automatic delays were added. This layout is now the protected standard.`);
+      alert(`Done. ${result.placed} flights were rebuilt into a realistic 0-overlap schedule. ${result.movedGate} gate changes and ${result.movedTime} time changes were made; maximum time shift was ${result.maxTimeShift || 0} minutes. No automatic delays were added. This layout is now the protected standard.`);
     } catch (e) {
       console.error(e);
       setSyncStatus('error', `● Standard save failed — ${e?.message || e}`);
