@@ -517,22 +517,19 @@ function forceFitEverythingNoDelays() {
   function orderedGates(item) {
     const f = item.flight;
     const compatible = compatibleGateIds(f);
-    const compatibleSet = new Set(compatible);
-    const others = gateIds.filter(id => !compatibleSet.has(id));
 
-    // Keep the existing gate first if it works, then nearby same-airline gates,
-    // then other physically open gates. This keeps the standard looking natural.
+    // Airline ownership is a HARD constraint. The solver may change time as much
+    // as necessary, but it may never place a scheduled flight at another airline's gate.
     const gateNum = id => Number(String(id).replace(/^[A-Z]+/i,'')) || 999;
     const sameConcourse = id => String(id).charAt(0) === String(item.originalGate || '').charAt(0);
     const rank = id => {
       let score = 0;
       if (id === item.originalGate) score -= 10000;
-      if (!compatibleSet.has(id)) score += 5000;
       if (!sameConcourse(id)) score += 500;
       score += Math.abs(gateNum(id) - gateNum(item.originalGate));
       return score;
     };
-    return [...compatible, ...others].sort((a,b) => rank(a) - rank(b));
+    return compatible.sort((a,b) => rank(a) - rank(b));
   }
 
   function departureLoad(depMinute, radius) {
@@ -582,6 +579,9 @@ function forceFitEverythingNoDelays() {
   for (const item of flights) {
     const f = item.flight;
     const gates = orderedGates(item);
+    if (!gates.length) {
+      throw new Error(`No configured ${effectiveAirline(f)} gate exists for ${f.flightNumber || f.id}.`);
+    }
     let best = null;
 
     // Evaluate candidates by realism instead of first-available packing.
@@ -648,11 +648,28 @@ function forceFitEverythingNoDelays() {
   return { placed, movedGate, movedTime, remaining, maxTimeShift };
 }
 
+
+function getWrongAirlineGateAssignments() {
+  return FLIGHTS.filter(f => {
+    if (!f || f.status === 'CANCELLED' || f.status === 'DIVERTED') return false;
+    const id = String(f.sheetId || f.id || '');
+    if (id.startsWith('sim_') || f?.ops?.inboundDiversion) return false;
+    return !gateCompatibleForFlight(f, f.gate);
+  });
+}
+
 async function promoteCurrentLayoutToProtectedStandard() {
   if (!SHEET_URL) throw new Error('Sheet connection is not configured.');
 
   setSyncStatus('online', '● Building realistic conflict-free schedule…');
   const result = forceFitEverythingNoDelays();
+
+  const wrongAirline = getWrongAirlineGateAssignments();
+  if (wrongAirline.length) {
+    throw new Error(
+      `Solver left ${wrongAirline.length} flight${wrongAirline.length === 1 ? '' : 's'} at another airline's gate. The standard was NOT saved.`
+    );
+  }
 
   if (result.remaining) {
     throw new Error(`Force-fit finished with ${result.remaining} overlap(s), so the standard was not saved.`);
