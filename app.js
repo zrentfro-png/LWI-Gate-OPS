@@ -1903,10 +1903,10 @@ async function resetSimulation(reason, preserveCarryovers) {
     const params = new URLSearchParams({ action: 'reset', carryovers: JSON.stringify(carryovers) });
     const data = await fetchSheetJson(SHEET_URL + '?' + params.toString());
     if (data.error) throw new Error(data.error || 'Reset failed');
-    FLIGHTS = dedupeFlightsById((data.rows || []).map(rowToFlight).filter(f => String(f.id || '').trim()));
+    const resetRows = Array.isArray(data?.rows) ? data.rows : (Array.isArray(data) ? data : []);
+    FLIGHTS = dedupeFlightsById(resetRows.map((row, index) => rowToFlight(row, index)));
     SHEET_FLIGHT_IDS = new Set(
-      FLIGHTS.map(f => String(f.id || '').trim())
-        .filter(id => id && !id.startsWith('legacy_') && !id.startsWith('sim_'))
+      FLIGHTS.map(f => String(f.sheetId || '').trim()).filter(Boolean)
     );
     const normalized = normalizeResetScheduleToZeroConflicts();
     if (normalized.remaining === 0) {
@@ -1964,24 +1964,71 @@ function renderEventsPanel() {
 
 function setSyncStatus(state, label) { const el = document.getElementById('syncStatus'); el.className = `sync-status sync-${state}`; el.textContent = label; }
 
-function rowToFlight(row) {
+function makeUiOnlyFlightId(row, index = 0) {
+  const parts = [
+    row['FLIGHT NUMBER'] || '',
+    row['TO:'] || '',
+    row['GATE:'] || '',
+    row['BOARDING TIME:'] || '',
+    row['DEPARTURE TIME:'] || '',
+    index
+  ];
+  const raw = parts.join('|').toUpperCase();
+  let hash = 2166136261;
+  for (let i = 0; i < raw.length; i++) {
+    hash ^= raw.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `ui_${(hash >>> 0).toString(36)}`;
+}
+
+function rowToFlight(row, index = 0) {
   const dep = row['DEPARTURE TIME:'] || '';
   const gateStart = row['GATE BLOCK START:'] || '';
   const flightNumber = row['FLIGHT NUMBER'] || '';
   const rawAirline = row['AIRLINE'] || row['AIRLINE:'] || '';
   const airline = canonicalAirlineName(rawAirline) || inferAirlineFromFlightNumber(flightNumber);
+  const sheetId = String(row['GATEOPS ID'] || row.id || '').trim();
+
   return {
-    id: String(row['GATEOPS ID'] || row.id || '').trim(),
-    airline, flightNumber, to: row['TO:'] || '', gate: row['GATE:'] || '',
-    boarding: row['BOARDING TIME:'] || '', departure: dep, status: row['STATUS:'] || 'ON TIME', comments: row['COMMENTS'] || '', delayTag: row['DELAY TAG:'] || '',
+    id: sheetId || makeUiOnlyFlightId(row, index),
+    sheetId: sheetId || '',
+    airline,
+    flightNumber,
+    to: row['TO:'] || '',
+    gate: row['GATE:'] || '',
+    boarding: row['BOARDING TIME:'] || '',
+    departure: dep,
+    status: row['STATUS:'] || 'ON TIME',
+    comments: row['COMMENTS'] || '',
+    delayTag: row['DELAY TAG:'] || '',
     gateStart,
-    base: row.__IS_BASELINE ? { gate: row.__BASE_GATE || '', boarding: row.__BASE_BOARDING || '', departure: row.__BASE_DEPARTURE || '', status: row.__BASE_STATUS || 'ON TIME', comments: row.__BASE_COMMENTS || '', gateStart: row.__BASE_GATE_START || '' } : null,
+    base: row.__IS_BASELINE ? {
+      gate: row.__BASE_GATE || '',
+      boarding: row.__BASE_BOARDING || '',
+      departure: row.__BASE_DEPARTURE || '',
+      status: row.__BASE_STATUS || 'ON TIME',
+      comments: row.__BASE_COMMENTS || '',
+      gateStart: row.__BASE_GATE_START || ''
+    } : null,
     ops: null,
   };
 }
 
 function flightToRow(f) {
-  return { 'GATEOPS ID': f.id, 'AIRLINE': f.airline, 'FLIGHT NUMBER': f.flightNumber, 'TO:': f.to, 'GATE:': f.gate, 'BOARDING TIME:': f.boarding, 'DEPARTURE TIME:': f.departure, 'STATUS:': f.status, 'COMMENTS': f.comments, 'GATE BLOCK START:': f.gateStart || '', 'DELAY TAG:': f.delayTag || '' };
+  return {
+    'GATEOPS ID': String(f.sheetId || f.id || '').trim(),
+    'AIRLINE': f.airline,
+    'FLIGHT NUMBER': f.flightNumber,
+    'TO:': f.to,
+    'GATE:': f.gate,
+    'BOARDING TIME:': f.boarding,
+    'DEPARTURE TIME:': f.departure,
+    'STATUS:': f.status,
+    'COMMENTS': f.comments,
+    'GATE BLOCK START:': f.gateStart || '',
+    'DELAY TAG:': f.delayTag || ''
+  };
 }
 
 async function fetchSheetJson(url) {
@@ -2003,16 +2050,33 @@ async function loadFromSheet() {
   setSyncStatus('offline', '● Connecting…');
   try {
     const data = await fetchSheetJson(SHEET_URL + '?action=list&_=' + Date.now());
-    if (data.error || !Array.isArray(data)) throw new Error(data.error || 'Load failed');
-    FLIGHTS = dedupeFlightsById(data.map(rowToFlight).filter(f => String(f.id || '').trim()));
-    // Only durable IDs actually returned by Google Sheets are eligible for writes.
-    // Random/temporary/legacy IDs are never considered Sheet-backed.
+    if (data?.error) throw new Error(data.error || 'Load failed');
+
+    const rows = Array.isArray(data)
+      ? data
+      : (Array.isArray(data?.rows) ? data.rows : null);
+
+    if (!rows) throw new Error('Sheet endpoint connected, but did not return a flight-row array.');
+
+    FLIGHTS = dedupeFlightsById(rows.map((row, index) => rowToFlight(row, index)));
+
+    // Only real IDs supplied by the Sheet are eligible for writes.
     SHEET_FLIGHT_IDS = new Set(
-      FLIGHTS.map(f => String(f.id || '').trim())
-        .filter(id => id && !id.startsWith('legacy_') && !id.startsWith('sim_'))
+      FLIGHTS.map(f => String(f.sheetId || '').trim())
+        .filter(Boolean)
     );
+
     const restored = restoreOperationalState();
-    setSyncStatus('online', `● Synced (${new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',hour12:true})})${restored ? ' · game restored' : ''}`);
+
+    if (!FLIGHTS.length) {
+      setSyncStatus('error', '● Connected, but 0 flight rows were returned');
+    } else {
+      const noIdCount = FLIGHTS.filter(f => !String(f.sheetId || '').trim()).length;
+      setSyncStatus(
+        noIdCount ? 'error' : 'online',
+        `● Loaded ${FLIGHTS.length} flight${FLIGHTS.length === 1 ? '' : 's'}${noIdCount ? ` · ${noIdCount} missing Sheet ID${noIdCount === 1 ? '' : 's'}` : ' · synced'}`
+      );
+    }
     renderBoard();
     populateAtcCityOptions();
     renderHistoryPanel();
@@ -2025,15 +2089,15 @@ function queueFlightSync(flight) {
   persistOperationalState();
   // Random inbound diversions are simulation-only. They survive reload through
   // operational state, but must never become rows in the recurring Google Sheet.
-  const candidateId = String(flight?.id || '').trim();
-  if (!candidateId || candidateId.startsWith('legacy_') || candidateId.startsWith('sim_') || flight?.ops?.inboundDiversion) return;
+  const candidateId = String(flight?.sheetId || flight?.id || '').trim();
+  if (!candidateId || candidateId.startsWith('ui_') || candidateId.startsWith('legacy_') || candidateId.startsWith('sim_') || flight?.ops?.inboundDiversion) return;
   if (!SHEET_URL) return;
-  const flightId = String(flight?.id || '');
+  const flightId = candidateId;
   // Absolute no-append rule: if this flight was not already present in the
   // Google Sheet when loaded, it may exist in the simulation but it cannot
   // create a new Sheet row.
   if (!SHEET_FLIGHT_IDS.has(flightId)) return;
-  syncQueue.set(flight.id, flightToRow(flight));
+  syncQueue.set(flightId, flightToRow(flight));
   clearTimeout(syncTimer); syncTimer = setTimeout(flushSyncQueue, 500);
 }
 
