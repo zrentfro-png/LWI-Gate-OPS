@@ -370,6 +370,10 @@ function airlinesMatch(a, b) {
   const na = canonicalAirlineName(a), nb = canonicalAirlineName(b);
   return !!na && !!nb && (na === nb || na.includes(nb) || nb.includes(na));
 }
+function gateCompatibleForFlight(flight, gateId) {
+  const gate = GATE_BY_ID[gateId];
+  return !!gate && airlinesMatch(gate.airline, effectiveAirline(flight));
+}
 function isWrongAirlineGate(flight) {
   const gate = GATE_BY_ID[flight.gate];
   return !!gate && !airlinesMatch(gate.airline, effectiveAirline(flight));
@@ -474,8 +478,6 @@ function forceFitEverythingNoDelays() {
   const blockMinutes = Math.max(30, Number(CONFIG.TURNAROUND_MINUTES) || 90);
   const boardLead = 30;
 
-  // This is a schedule REPAIR, not a packing exercise. Preserve each flight's
-  // original minute whenever possible and solve conflicts with gates first.
   const flights = FLIGHTS
     .filter(f => {
       const id = String(f.sheetId || f.id || '').trim();
@@ -485,18 +487,62 @@ function forceFitEverythingNoDelays() {
       let desiredDep = toTimelineMinutes(f.departure);
       if (desiredDep === null) desiredDep = TIMELINE_START_MIN + blockMinutes;
       desiredDep = Math.max(TIMELINE_START_MIN + blockMinutes, Math.min(TIMELINE_END_MIN, desiredDep));
-      return {
-        flight: f,
-        index,
-        desiredDep,
-        desiredStart: desiredDep - blockMinutes,
-        originalGate: f.gate
-      };
+      return { flight: f, index, desiredDep, originalGate: f.gate };
     })
     .sort((a,b) => a.desiredDep - b.desiredDep || a.index - b.index);
 
+  // Smooth airport-wide demand curve for the 24 operational hours beginning at 5 AM.
+  // Every hour remains active; midday/afternoon is busier, overnight is lighter.
+  const hourWeights = [
+    0.70, 0.78, 0.86, 0.95, 1.05, 1.15,
+    1.22, 1.28, 1.32, 1.35, 1.34, 1.31,
+    1.27, 1.20, 1.12, 1.03, 0.94, 0.86,
+    0.79, 0.73, 0.68, 0.64, 0.60, 0.58
+  ];
+
+  function allocateHourlyCounts(total) {
+    const sum = hourWeights.reduce((a,b) => a+b, 0);
+    const raw = hourWeights.map(w => total * w / sum);
+    const counts = raw.map(Math.floor);
+    let remaining = total - counts.reduce((a,b) => a+b, 0);
+    const order = raw
+      .map((v,i) => ({i, frac: v - Math.floor(v)}))
+      .sort((a,b) => b.frac - a.frac);
+    for (let k = 0; k < remaining; k++) counts[order[k % order.length].i]++;
+    return counts;
+  }
+
+  function buildSmoothTargetDepartures(total) {
+    const counts = allocateHourlyCounts(total);
+    const slots = [];
+
+    counts.forEach((count, hourIndex) => {
+      const hourStart = TIMELINE_START_MIN + hourIndex * 60;
+      if (!count) return;
+
+      // Spread departures throughout the hour instead of creating banks at :00/:15/:30/:45.
+      // The small deterministic phase shift keeps adjacent hours from looking identical.
+      const phase = (hourIndex * 7) % Math.max(1, count);
+      for (let j = 0; j < count; j++) {
+        const k = (j + phase) % count;
+        const minuteInHour = Math.min(59, Math.max(0, Math.floor(((k + 0.5) * 60) / count)));
+        slots.push(hourStart + minuteInHour);
+      }
+    });
+
+    slots.sort((a,b) => a-b);
+    return slots;
+  }
+
+  const targetDeps = buildSmoothTargetDepartures(flights.length);
+  flights.forEach((item, i) => {
+    item.targetDep = targetDeps[i] ?? item.desiredDep;
+    item.targetStart = item.targetDep - blockMinutes;
+  });
+
   const intervalsByGate = Object.fromEntries(gateIds.map(id => [id, []]));
   const departuresByMinute = new Map();
+  const departuresByHour = new Map();
 
   function slotFree(gateId, start, end) {
     return intervalsByGate[gateId].every(w => !(start < w.end && w.start < end));
@@ -508,65 +554,60 @@ function forceFitEverythingNoDelays() {
   }
 
   function compatibleGateIds(flight) {
-    return gateIds.filter(id => {
-      const gate = GATE_BY_ID[id];
-      return gate && airlinesMatch(gate.airline, effectiveAirline(flight));
-    });
+    return gateIds.filter(id => gateCompatibleForFlight(flight, id));
   }
 
   function orderedGates(item) {
-    const f = item.flight;
-    const compatible = compatibleGateIds(f);
-
-    // Airline ownership is a HARD constraint. The solver may change time as much
-    // as necessary, but it may never place a scheduled flight at another airline's gate.
+    const compatible = compatibleGateIds(item.flight);
     const gateNum = id => Number(String(id).replace(/^[A-Z]+/i,'')) || 999;
-    const sameConcourse = id => String(id).charAt(0) === String(item.originalGate || '').charAt(0);
-    const rank = id => {
-      let score = 0;
-      if (id === item.originalGate) score -= 10000;
-      if (!sameConcourse(id)) score += 500;
-      score += Math.abs(gateNum(id) - gateNum(item.originalGate));
-      return score;
-    };
-    return compatible.sort((a,b) => rank(a) - rank(b));
+    const originalPrefix = String(item.originalGate || '').charAt(0);
+    return compatible.sort((a,b) => {
+      const score = id => {
+        let v = 0;
+        if (id === item.originalGate) v -= 10000;
+        if (String(id).charAt(0) !== originalPrefix) v += 300;
+        v += Math.abs(gateNum(id) - gateNum(item.originalGate));
+        return v;
+      };
+      return score(a) - score(b);
+    });
   }
 
-  function departureLoad(depMinute, radius) {
-    let total = 0;
-    for (let m = depMinute - radius; m <= depMinute + radius; m++) {
-      total += departuresByMinute.get(m) || 0;
-    }
-    return total;
+  function hourIndexForMinute(depMinute) {
+    return Math.max(0, Math.min(23, Math.floor((depMinute - TIMELINE_START_MIN) / 60)));
   }
 
-  function departurePenalty(depMinute) {
+  function localDeparturePenalty(depMinute) {
     const exact = departuresByMinute.get(depMinute) || 0;
-    const near5 = departureLoad(depMinute, 5);
-    const near15 = departureLoad(depMinute, 15);
-    const near30 = departureLoad(depMinute, 30);
+    let near3 = 0, near10 = 0;
+    for (let m = depMinute - 10; m <= depMinute + 10; m++) {
+      const c = departuresByMinute.get(m) || 0;
+      if (Math.abs(m - depMinute) <= 3) near3 += c;
+      near10 += c;
+    }
 
-    // Strongly discourage unrealistic exact-time piles, while still allowing
-    // busy banks spread over a realistic 10-30 minute window.
-    return exact * 160 + near5 * 24 + near15 * 8 + near30 * 2;
+    // Exact simultaneous departures are expensive; nearby traffic is allowed but smoothed.
+    return exact * 2500 + near3 * 110 + near10 * 14;
+  }
+
+  function hourlyPenalty(depMinute) {
+    const h = hourIndexForMinute(depMinute);
+    const current = departuresByHour.get(h) || 0;
+    const target = allocateHourlyCounts(flights.length)[h];
+    return Math.max(0, current - target) * 80 + Math.max(0, current + 1 - target - 2) * 240;
   }
 
   function timeCandidates(item) {
-    const desired = item.desiredStart;
-    const minStart = TIMELINE_START_MIN;
-    const maxStart = TIMELINE_END_MIN - blockMinutes;
-    const base = Math.max(minStart, Math.min(maxStart, desired));
-    const out = [];
+    const minDep = TIMELINE_START_MIN + blockMinutes;
+    const maxDep = TIMELINE_END_MIN;
+    const base = Math.max(minDep, Math.min(maxDep, item.targetDep));
+    const out = [base];
 
-    // Exact original minute is always first. Then move in ONE-minute steps so
-    // the schedule never gets snapped into artificial :00/:15/:30/:45 banks.
-    out.push(base);
-    const maxShift = Math.max(base - minStart, maxStart - base);
+    // Search minute-by-minute around the smooth target time, alternating later/earlier.
+    const maxShift = Math.max(base - minDep, maxDep - base);
     for (let d = 1; d <= maxShift; d++) {
-      const later = base + d;
-      const earlier = base - d;
-      if (later <= maxStart) out.push(later);
-      if (earlier >= minStart) out.push(earlier);
+      if (base + d <= maxDep) out.push(base + d);
+      if (base - d >= minDep) out.push(base - d);
     }
     return out;
   }
@@ -582,52 +623,54 @@ function forceFitEverythingNoDelays() {
     if (!gates.length) {
       throw new Error(`No configured ${effectiveAirline(f)} gate exists for ${f.flightNumber || f.id}.`);
     }
-    let best = null;
 
-    // Evaluate candidates by realism instead of first-available packing.
-    // Usually this selects the exact original minute on a different gate.
-    for (const start of timeCandidates(item)) {
-      const end = start + blockMinutes;
-      const shift = Math.abs(end - item.desiredDep);
+    let best = null;
+    for (const dep of timeCandidates(item)) {
+      const start = dep - blockMinutes;
+      const shiftFromTarget = Math.abs(dep - item.targetDep);
+      const shiftFromOriginal = Math.abs(dep - item.desiredDep);
 
       for (let gi = 0; gi < gates.length; gi++) {
         const gateId = gates[gi];
-        if (!slotFree(gateId, start, end)) continue;
+        if (!slotFree(gateId, start, dep)) continue;
 
-        const gate = GATE_BY_ID[gateId];
-        const owned = gate && airlinesMatch(gate.airline, effectiveAirline(f));
-        const gatePenalty = gateId === item.originalGate ? 0 : (owned ? 12 : 90);
-        const score = shift * 1000 + departurePenalty(end) + gatePenalty + gi * 0.01;
+        // Preserve the realistic demand curve first, original timing second, and gate familiarity third.
+        const score =
+          shiftFromTarget * 900 +
+          shiftFromOriginal * 6 +
+          localDeparturePenalty(dep) +
+          hourlyPenalty(dep) +
+          (gateId === item.originalGate ? 0 : 8) +
+          gi * 0.01;
 
         if (!best || score < best.score) {
-          best = { gateId, start, end, score, shift };
+          best = { gateId, start, dep, score, shiftFromTarget, shiftFromOriginal };
         }
       }
 
-      // Once we've found a placement at the exact minute or within a very small
-      // shift, don't scan the entire day unless crowding/gates truly require it.
-      if (best && best.shift === 0) break;
-      if (best && shift > 20 && best.shift <= 5) break;
-      if (best && shift > 90 && best.shift <= 30) break;
+      if (best && best.shiftFromTarget === 0) break;
+      if (best && shiftFromTarget > 45 && best.shiftFromTarget <= 5) break;
+      if (best && shiftFromTarget > 120 && best.shiftFromTarget <= 20) break;
     }
 
-    if (!best) throw new Error(`Could not fit ${f.flightNumber || f.id} anywhere in the operational day.`);
+    if (!best) {
+      throw new Error(`Could not fit ${f.flightNumber || f.id} within ${effectiveAirline(f)} gates during the operational day.`);
+    }
 
     const oldGate = f.gate;
     const oldDep = toTimelineMinutes(f.departure);
     if (oldGate !== best.gateId) movedGate++;
-    if (oldDep === null || oldDep !== best.end) movedTime++;
-    maxTimeShift = Math.max(maxTimeShift, best.shift);
+    if (oldDep === null || oldDep !== best.dep) movedTime++;
+    maxTimeShift = Math.max(maxTimeShift, best.shiftFromOriginal);
 
     f.gate = best.gateId;
     f.gateStart = minutesToClockString(best.start);
-    f.departure = minutesToClockString(best.end);
-    f.boarding = minutesToClockString(Math.max(best.start, best.end - boardLead));
-
-    // Standard-schedule construction is not an operational disruption.
+    f.departure = minutesToClockString(best.dep);
+    f.boarding = minutesToClockString(Math.max(best.start, best.dep - boardLead));
     f.status = 'ON TIME';
     f.delayTag = '';
     f.comments = '';
+
     const ops = ensureOps(f);
     ops.departed = false;
     ops.taxiRequested = false;
@@ -635,8 +678,10 @@ function forceFitEverythingNoDelays() {
     ops.pushbackRequested = false;
     ops.pushbackApproved = false;
 
-    addSlot(best.gateId, best.start, best.end);
-    departuresByMinute.set(best.end, (departuresByMinute.get(best.end) || 0) + 1);
+    addSlot(best.gateId, best.start, best.dep);
+    departuresByMinute.set(best.dep, (departuresByMinute.get(best.dep) || 0) + 1);
+    const h = hourIndexForMinute(best.dep);
+    departuresByHour.set(h, (departuresByHour.get(h) || 0) + 1);
     queueFlightSync(f);
     placed++;
   }
@@ -645,7 +690,10 @@ function forceFitEverythingNoDelays() {
   persistOperationalState();
 
   const remaining = getAllDayGateConflictPairsNoDepartedFilter().length;
-  return { placed, movedGate, movedTime, remaining, maxTimeShift };
+  const hourlyCounts = Array.from({length:24}, (_,h) => departuresByHour.get(h) || 0);
+  const maxSameMinute = departuresByMinute.size ? Math.max(...departuresByMinute.values()) : 0;
+
+  return { placed, movedGate, movedTime, remaining, maxTimeShift, hourlyCounts, maxSameMinute };
 }
 
 
@@ -700,7 +748,7 @@ async function promoteCurrentLayoutToProtectedStandard() {
   );
 
   logActivity(
-    `Built realistic conflict-free standard for ${result.placed} flights; ${result.movedGate} gate changes, ${result.movedTime} time changes, max time shift ${result.maxTimeShift || 0} min. Google Sheet verified ${syncResult.verified}/${syncResult.requested} before promotion. No automatic delays.`,
+    `Built realistic conflict-free standard for ${result.placed} flights; ${result.movedGate} gate changes, ${result.movedTime} time changes, max time shift ${result.maxTimeShift || 0} min, busiest exact minute ${result.maxSameMinute || 0} departures. Google Sheet verified ${syncResult.verified}/${syncResult.requested} before promotion. No automatic delays.`,
     'RESET'
   );
 
