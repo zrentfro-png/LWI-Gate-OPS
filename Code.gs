@@ -91,7 +91,9 @@ function getHeaders(sheet) {
 function ensureSystemReady() {
   const sheet = getLiveSheet();
   ensureSchema(sheet);
-  ensureIds(sheet);
+  // Existing rows can be addressed safely by synthetic row_N keys when the
+  // hidden GATEOPS ID column is blank, so loading/saving no longer depends on
+  // writing hundreds of IDs first.
   removeDuplicateRowsById(sheet);
   ensureBaselineExists();
 }
@@ -198,12 +200,17 @@ function readRows(sheet) {
   if (lastRow < 2) return [];
   const values = sheet.getRange(2, 1, lastRow - 1, headers.length).getValues();
   return values
-    .filter(row => row.some(v => String(v).trim() !== ''))
-    .map(row => {
+    .map((row, index) => {
+      if (!row.some(v => String(v).trim() !== '')) return null;
       const obj = {};
       headers.forEach((header, i) => obj[header] = formatCell(row[i]));
+      obj.__ROW_NUMBER = index + 2;
+      // If the hidden durable ID is blank, expose a synthetic key tied to this
+      // existing row. It can update the row but can never create a new one.
+      if (!String(obj[ID_COLUMN] || '').trim()) obj[ID_COLUMN] = `row_${index + 2}`;
       return obj;
-    });
+    })
+    .filter(Boolean);
 }
 
 function getAllRowsWithBaseline() {
@@ -211,9 +218,11 @@ function getAllRowsWithBaseline() {
   const baselineSheet = getSpreadsheet().getSheetByName(BASELINE_SHEET_NAME);
   const baselineRows = baselineSheet ? readRows(baselineSheet) : [];
   const baseById = new Map(baselineRows.map(r => [String(r[ID_COLUMN] || ''), r]));
+  const baseByRow = new Map(baselineRows.map(r => [Number(r.__ROW_NUMBER), r]));
 
   return liveRows.map(row => {
-    const base = baseById.get(String(row[ID_COLUMN] || '')) || null;
+    const rowId = String(row[ID_COLUMN] || '');
+    const base = baseById.get(rowId) || baseByRow.get(Number(row.__ROW_NUMBER)) || null;
     return Object.assign({}, row, {
       __BASE_GATE: base ? base['GATE:'] : null,
       __BASE_BOARDING: base ? base['BOARDING TIME:'] : null,
@@ -234,6 +243,18 @@ function formatCell(value) {
 }
 
 function findRowIndexById(sheet, id) {
+  const rawId = String(id || '').trim();
+
+  // Synthetic row key fallback for existing rows whose GATEOPS ID is blank.
+  const rowMatch = /^row_(\d+)$/.exec(rawId);
+  if (rowMatch) {
+    const rowNumber = Number(rowMatch[1]);
+    if (Number.isInteger(rowNumber) && rowNumber >= 2 && rowNumber <= sheet.getLastRow()) {
+      return rowNumber;
+    }
+    return -1;
+  }
+
   const headers = getHeaders(sheet);
   const idIndex = headers.indexOf(ID_COLUMN);
   if (idIndex === -1) throw new Error('Column "' + ID_COLUMN + '" was not found.');
@@ -241,7 +262,7 @@ function findRowIndexById(sheet, id) {
   if (lastRow < 2) return -1;
   const values = sheet.getRange(2, idIndex + 1, lastRow - 1, 1).getValues();
   for (let i = 0; i < values.length; i++) {
-    if (String(values[i][0]).trim() === String(id).trim()) return i + 2;
+    if (String(values[i][0]).trim() === rawId) return i + 2;
   }
   return -1;
 }
@@ -255,6 +276,8 @@ function getRowById(id) {
   const values = sheet.getRange(rowIndex, 1, 1, headers.length).getValues()[0];
   const obj = {};
   headers.forEach((header, i) => obj[header] = formatCell(values[i]));
+  if (!String(obj[ID_COLUMN] || '').trim()) obj[ID_COLUMN] = String(id);
+  obj.__ROW_NUMBER = rowIndex;
   return obj;
 }
 
@@ -271,8 +294,9 @@ function upsertRow(rowObj) {
     throw new Error('Unknown GATEOPS ID "' + id + '". New flight rows are not allowed; only existing rows may be updated.');
   }
 
-  rowObj[ID_COLUMN] = id;
+  const isSyntheticRowId = /^row_\d+$/.test(id);
   Object.keys(rowObj).forEach(header => {
+    if (header === ID_COLUMN && isSyntheticRowId) return; // never write row_N into the Sheet
     const columnIndex = headers.indexOf(header);
     if (columnIndex === -1) return;
     sheet.getRange(rowIndex, columnIndex + 1).setValue(rowObj[header]);
