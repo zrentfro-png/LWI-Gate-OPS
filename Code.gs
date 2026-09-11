@@ -115,23 +115,36 @@ function ensureSchema(sheet) {
 function ensureIds(sheet) {
   const headers = getHeaders(sheet);
   const idIndex = headers.indexOf(ID_COLUMN);
-  const flightIndex = headers.indexOf('FLIGHT NUMBER');
-  if (idIndex === -1 || flightIndex === -1) throw new Error('Required columns are missing.');
+  if (idIndex === -1) throw new Error('Required column "' + ID_COLUMN + '" is missing.');
 
   const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return;
+  const lastCol = sheet.getLastColumn();
+  if (lastRow < 2 || lastCol < 1) return;
 
-  const flightValues = sheet.getRange(2, flightIndex + 1, lastRow - 1, 1).getValues();
+  // Read all existing rows so ID repair does not depend on one particular
+  // header spelling. Any non-empty existing row gets a durable ID.
+  const values = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues();
   const idValues = sheet.getRange(2, idIndex + 1, lastRow - 1, 1).getValues();
   let changed = false;
-  for (let i = 0; i < flightValues.length; i++) {
-    if (String(flightValues[i][0]).trim() && !String(idValues[i][0]).trim()) {
+
+  for (let i = 0; i < values.length; i++) {
+    const rowHasData = values[i].some((value, colIndex) => {
+      // Ignore the ID column itself when deciding whether this is a real row.
+      if (colIndex === idIndex) return false;
+      return String(value ?? '').trim() !== '';
+    });
+    if (rowHasData && !String(idValues[i][0] || '').trim()) {
       idValues[i][0] = Utilities.getUuid();
       changed = true;
     }
   }
-  // Only write the ID column. Never rewrite the image/formula columns.
-  if (changed) sheet.getRange(2, idIndex + 1, idValues.length, 1).setValues(idValues);
+
+  // Only write the hidden ID column. Existing schedule/image/formula cells
+  // are never rewritten by this repair.
+  if (changed) {
+    sheet.getRange(2, idIndex + 1, idValues.length, 1).setValues(idValues);
+    SpreadsheetApp.flush();
+  }
 }
 
 function removeDuplicateRowsById(sheet) {

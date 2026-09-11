@@ -1903,8 +1903,11 @@ async function resetSimulation(reason, preserveCarryovers) {
     const params = new URLSearchParams({ action: 'reset', carryovers: JSON.stringify(carryovers) });
     const data = await fetchSheetJson(SHEET_URL + '?' + params.toString());
     if (data.error) throw new Error(data.error || 'Reset failed');
-    FLIGHTS = dedupeFlightsById((data.rows || []).map(rowToFlight));
-    SHEET_FLIGHT_IDS = new Set(FLIGHTS.map(f => String(f.id || '')).filter(Boolean));
+    FLIGHTS = dedupeFlightsById((data.rows || []).map(rowToFlight).filter(f => String(f.id || '').trim()));
+    SHEET_FLIGHT_IDS = new Set(
+      FLIGHTS.map(f => String(f.id || '').trim())
+        .filter(id => id && !id.startsWith('legacy_') && !id.startsWith('sim_'))
+    );
     const normalized = normalizeResetScheduleToZeroConflicts();
     if (normalized.remaining === 0) {
       logActivity(`Reset schedule normalized to 0 conflicts${normalized.moved ? `; ${normalized.moved} flight${normalized.moved === 1 ? '' : 's'} repositioned` : ''}.`, 'RESET');
@@ -1968,7 +1971,7 @@ function rowToFlight(row) {
   const rawAirline = row['AIRLINE'] || row['AIRLINE:'] || '';
   const airline = canonicalAirlineName(rawAirline) || inferAirlineFromFlightNumber(flightNumber);
   return {
-    id: row['GATEOPS ID'] || row.id || `legacy_${Math.random()}`,
+    id: String(row['GATEOPS ID'] || row.id || '').trim(),
     airline, flightNumber, to: row['TO:'] || '', gate: row['GATE:'] || '',
     boarding: row['BOARDING TIME:'] || '', departure: dep, status: row['STATUS:'] || 'ON TIME', comments: row['COMMENTS'] || '', delayTag: row['DELAY TAG:'] || '',
     gateStart,
@@ -2001,9 +2004,13 @@ async function loadFromSheet() {
   try {
     const data = await fetchSheetJson(SHEET_URL + '?action=list&_=' + Date.now());
     if (data.error || !Array.isArray(data)) throw new Error(data.error || 'Load failed');
-    FLIGHTS = dedupeFlightsById(data.map(rowToFlight));
-    // Only IDs actually returned by Google Sheets are ever eligible for Sheet writes.
-    SHEET_FLIGHT_IDS = new Set(FLIGHTS.map(f => String(f.id || '')).filter(Boolean));
+    FLIGHTS = dedupeFlightsById(data.map(rowToFlight).filter(f => String(f.id || '').trim()));
+    // Only durable IDs actually returned by Google Sheets are eligible for writes.
+    // Random/temporary/legacy IDs are never considered Sheet-backed.
+    SHEET_FLIGHT_IDS = new Set(
+      FLIGHTS.map(f => String(f.id || '').trim())
+        .filter(id => id && !id.startsWith('legacy_') && !id.startsWith('sim_'))
+    );
     const restored = restoreOperationalState();
     setSyncStatus('online', `● Synced (${new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',hour12:true})})${restored ? ' · game restored' : ''}`);
     renderBoard();
@@ -2018,7 +2025,8 @@ function queueFlightSync(flight) {
   persistOperationalState();
   // Random inbound diversions are simulation-only. They survive reload through
   // operational state, but must never become rows in the recurring Google Sheet.
-  if (String(flight?.id || '').startsWith('sim_') || flight?.ops?.inboundDiversion) return;
+  const candidateId = String(flight?.id || '').trim();
+  if (!candidateId || candidateId.startsWith('legacy_') || candidateId.startsWith('sim_') || flight?.ops?.inboundDiversion) return;
   if (!SHEET_URL) return;
   const flightId = String(flight?.id || '');
   // Absolute no-append rule: if this flight was not already present in the
@@ -2044,6 +2052,7 @@ function verifySavedRow(sent, returned) {
 }
 
 async function flushSyncQueue() {
+  syncTimer = null;
   const rows = [...syncQueue.values()]; syncQueue.clear();
   if (!rows.length) return;
 
