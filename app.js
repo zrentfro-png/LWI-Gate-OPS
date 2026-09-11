@@ -440,11 +440,14 @@ function getAllDayConflictPairs() {
 
 
 function allPhysicalGateIds() {
-  return Object.keys(GATE_BY_ID || {});
+  return GATE_LIST.map(g => g.id);
 }
 
 function getAllDayGateConflictPairsNoDepartedFilter() {
-  const active = FLIGHTS.filter(f => f.status !== 'CANCELLED' && f.status !== 'DIVERTED');
+  const active = FLIGHTS.filter(f => {
+    const id = String(f.sheetId || f.id || '').trim();
+    return id && SHEET_FLIGHT_IDS.has(id) && !id.startsWith('sim_');
+  });
   const byGate = {};
   active.forEach(f => { (byGate[f.gate] ||= []).push(f); });
 
@@ -456,6 +459,7 @@ function getAllDayGateConflictPairsNoDepartedFilter() {
         const aw = occupancyWindow(list[i]);
         const bw = occupancyWindow(list[j]);
         if (!aw || !bw) continue;
+        if (bw.start >= aw.end) break;
         if (windowsOverlap(aw, bw)) pairs.push([list[i], list[j]]);
       }
     }
@@ -463,90 +467,131 @@ function getAllDayGateConflictPairsNoDepartedFilter() {
   return pairs;
 }
 
-function gateCompatibleForFlight(flight, gateId) {
-  const gate = GATE_BY_ID[gateId];
-  return !!gate && airlinesMatch(gate.airline, effectiveAirline(flight));
-}
+function forceFitEverythingNoDelays() {
+  const gateIds = allPhysicalGateIds();
+  if (!gateIds.length) throw new Error('No configured gates were found.');
 
-function gateIsFreeForWholeWindow(flight, gateId) {
-  const w = occupancyWindow(flight);
-  if (!w) return false;
+  const blockMinutes = Math.max(INTERVAL_MIN, Number(CONFIG.TURNAROUND_MINUTES) || 90);
+  const boardLead = 30;
 
-  return !FLIGHTS.some(other => {
-    if (other.id === flight.id) return false;
-    if (other.status === 'CANCELLED' || other.status === 'DIVERTED') return false;
-    if (other.gate !== gateId) return false;
-    const ow = occupancyWindow(other);
-    return ow && windowsOverlap(w, ow);
-  });
-}
+  // Build a totally fresh occupancy plan. We do NOT preserve stretched delay blocks.
+  const flights = FLIGHTS
+    .filter(f => {
+      const id = String(f.sheetId || f.id || '').trim();
+      return id && SHEET_FLIGHT_IDS.has(id) && !id.startsWith('sim_');
+    })
+    .map((f, index) => {
+      let desiredDep = toTimelineMinutes(f.departure);
+      if (desiredDep === null) desiredDep = TIMELINE_START_MIN + blockMinutes;
+      desiredDep = Math.max(TIMELINE_START_MIN + blockMinutes, Math.min(TIMELINE_END_MIN, desiredDep));
+      return { flight: f, index, desiredDep, desiredStart: desiredDep - blockMinutes };
+    })
+    .sort((a,b) => a.desiredStart - b.desiredStart || a.index - b.index);
 
-function findGateOnlyPlacement(flight) {
-  const compatible = allPhysicalGateIds()
-    .filter(gateId => gateId !== flight.gate && gateCompatibleForFlight(flight, gateId));
+  // intervalsByGate contains only placements made by THIS solver.
+  const intervalsByGate = Object.fromEntries(gateIds.map(id => [id, []]));
 
-  for (const gateId of compatible) {
-    if (gateIsFreeForWholeWindow(flight, gateId)) return gateId;
+  function slotFree(gateId, start, end) {
+    return intervalsByGate[gateId].every(w => !(start < w.end && w.start < end));
   }
 
-  // If every airline-owned gate is occupied, use any physically open gate.
-  // No time movement is allowed, so this still does not create a delay.
-  for (const gateId of allPhysicalGateIds()) {
-    if (gateId === flight.gate) continue;
-    if (gateIsFreeForWholeWindow(flight, gateId)) return gateId;
+  function addSlot(gateId, start, end) {
+    intervalsByGate[gateId].push({ start, end });
+    intervalsByGate[gateId].sort((a,b) => a.start - b.start);
   }
 
-  return null;
-}
+  function orderedGates(flight) {
+    const compatible = gateIds.filter(id => {
+      const gate = GATE_BY_ID[id];
+      return gate && airlinesMatch(gate.airline, effectiveAirline(flight));
+    });
+    const compatibleSet = new Set(compatible);
+    const others = gateIds.filter(id => !compatibleSet.has(id));
+    return [...compatible, ...others];
+  }
 
-function fixAllOverlapsGateOnly() {
-  let moved = 0;
-  let safety = 0;
+  // Search nearest to the flight's original time: same time, later, earlier, etc.
+  function candidateStarts(desiredStart) {
+    const minStart = TIMELINE_START_MIN;
+    const maxStart = TIMELINE_END_MIN - blockMinutes;
+    const clamped = Math.max(minStart, Math.min(maxStart, Math.round(desiredStart / INTERVAL_MIN) * INTERVAL_MIN));
+    const out = [clamped];
+    const maxSteps = Math.ceil((TIMELINE_END_MIN - TIMELINE_START_MIN) / INTERVAL_MIN);
+    for (let step = 1; step <= maxSteps; step++) {
+      const later = clamped + step * INTERVAL_MIN;
+      const earlier = clamped - step * INTERVAL_MIN;
+      if (later <= maxStart) out.push(later);
+      if (earlier >= minStart) out.push(earlier);
+      if (later > maxStart && earlier < minStart) break;
+    }
+    return out;
+  }
 
-  while (safety++ < 10000) {
-    const pairs = getAllDayGateConflictPairsNoDepartedFilter();
-    if (!pairs.length) break;
+  let movedGate = 0;
+  let movedTime = 0;
+  let placed = 0;
 
-    const [a, b] = pairs[0];
-    const aw = occupancyWindow(a);
-    const bw = occupancyWindow(b);
+  for (const item of flights) {
+    const f = item.flight;
+    let placement = null;
+    const gates = orderedGates(f);
 
-    // Prefer moving the later-starting flight so earlier assignments remain stable.
-    let target = ((bw?.start ?? 0) >= (aw?.start ?? 0)) ? b : a;
-    let alternate = target.id === b.id ? a : b;
-    let gate = findGateOnlyPlacement(target);
-
-    if (!gate) {
-      target = alternate;
-      gate = findGateOnlyPlacement(target);
+    for (const start of candidateStarts(item.desiredStart)) {
+      const end = start + blockMinutes;
+      for (const gateId of gates) {
+        if (slotFree(gateId, start, end)) {
+          placement = { gateId, start, end };
+          break;
+        }
+      }
+      if (placement) break;
     }
 
-    if (!gate) break;
+    if (!placement) {
+      throw new Error(`Could not fit ${f.flightNumber || f.id} anywhere in the operational day.`);
+    }
 
-    target.gate = gate;
+    const oldGate = f.gate;
+    const oldDep = toTimelineMinutes(f.departure);
+    if (oldGate !== placement.gateId) movedGate++;
+    if (oldDep === null || oldDep !== placement.end) movedTime++;
 
-    // Gate-only reassignment: intentionally DO NOT modify status, times,
-    // comments, delayTag, or gateStart.
-    queueFlightSync(target);
-    moved++;
+    f.gate = placement.gateId;
+    f.gateStart = minutesToClockString(placement.start);
+    f.departure = minutesToClockString(placement.end);
+    f.boarding = minutesToClockString(Math.max(placement.start, placement.end - boardLead));
+
+    // This is schedule construction, NOT an operational delay.
+    f.status = 'ON TIME';
+    f.delayTag = '';
+    f.comments = '';
+    const ops = ensureOps(f);
+    ops.departed = false;
+    ops.taxiRequested = false;
+    ops.taxiApproved = false;
+    ops.pushbackRequested = false;
+    ops.pushbackApproved = false;
+
+    addSlot(placement.gateId, placement.start, placement.end);
+    queueFlightSync(f);
+    placed++;
   }
 
   renderBoard();
   persistOperationalState();
 
-  return {
-    moved,
-    remaining: getAllDayGateConflictPairsNoDepartedFilter().length
-  };
+  const remaining = getAllDayGateConflictPairsNoDepartedFilter().length;
+  return { placed, movedGate, movedTime, remaining };
 }
 
 async function promoteCurrentLayoutToProtectedStandard() {
   if (!SHEET_URL) throw new Error('Sheet connection is not configured.');
 
-  const result = fixAllOverlapsGateOnly();
+  setSyncStatus('online', '● Force-fitting entire schedule…');
+  const result = forceFitEverythingNoDelays();
 
   if (result.remaining) {
-    throw new Error(`Gate-only cleanup could not remove every overlap. ${result.remaining} overlap(s) remain.`);
+    throw new Error(`Force-fit finished with ${result.remaining} overlap(s), so the standard was not saved.`);
   }
 
   if (syncTimer) {
@@ -555,28 +600,13 @@ async function promoteCurrentLayoutToProtectedStandard() {
   }
   await flushSyncQueue();
 
-  setSyncStatus('online', '● Saving clean layout as standard…');
-
-  const params = new URLSearchParams({
-    action: 'promoteStandard',
-    _: String(Date.now())
-  });
+  setSyncStatus('online', '● Saving conflict-free layout as standard…');
+  const params = new URLSearchParams({ action: 'promoteStandard', _: String(Date.now()) });
   const data = await fetchSheetJson(SHEET_URL + '?' + params.toString());
+  if (data?.error || !data?.ok) throw new Error(data?.error || 'Could not save new protected standard.');
 
-  if (data?.error || !data?.ok) {
-    throw new Error(data?.error || 'Could not save new protected standard.');
-  }
-
-  setSyncStatus(
-    'online',
-    `● New protected standard saved (${new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',hour12:true})})`
-  );
-
-  logActivity(
-    `Conflict-free gate layout saved as the protected standard; ${result.moved} flight${result.moved === 1 ? '' : 's'} reassigned with no automatic delays.`,
-    'RESET'
-  );
-
+  setSyncStatus('online', `● Conflict-free standard saved (${new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',hour12:true})})`);
+  logActivity(`Force-fit ${result.placed} flights into a conflict-free standard; ${result.movedGate} gate changes and ${result.movedTime} time changes, with no automatic delays.`, 'RESET');
   return result;
 }
 
@@ -2359,7 +2389,7 @@ if (cleanStandardBtn) {
     cleanStandardBtn.disabled = true;
     try {
       const result = await promoteCurrentLayoutToProtectedStandard();
-      alert(`Done. ${result.moved} flight${result.moved === 1 ? '' : 's'} moved to eliminate overlaps. No automatic delays were added. This layout is now the protected standard.`);
+      alert(`Done. ${result.placed} flights were force-fit with 0 overlaps. ${result.movedGate} gate changes and ${result.movedTime} time changes were made. No automatic delays were added. This layout is now the protected standard.`);
     } catch (e) {
       console.error(e);
       setSyncStatus('error', `● Standard save failed — ${e?.message || e}`);
