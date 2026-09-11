@@ -437,6 +437,145 @@ function getAllDayConflictPairs() {
   return pairs;
 }
 
+
+function getAllDayGateConflictPairsNoDepartedFilter() {
+  const active = FLIGHTS.filter(f => f.status !== 'CANCELLED' && f.status !== 'DIVERTED');
+  const byGate = {};
+  active.forEach(f => { (byGate[f.gate] ||= []).push(f); });
+
+  const pairs = [];
+  Object.values(byGate).forEach(list => {
+    list.sort((a,b) => (gateStartMinutes(a) ?? Infinity) - (gateStartMinutes(b) ?? Infinity));
+    for (let i = 0; i < list.length; i++) {
+      for (let j = i + 1; j < list.length; j++) {
+        const aw = occupancyWindow(list[i]);
+        const bw = occupancyWindow(list[j]);
+        if (!aw || !bw) continue;
+        if (windowsOverlap(aw, bw)) pairs.push([list[i], list[j]]);
+      }
+    }
+  });
+  return pairs;
+}
+
+function gateCompatibleForFlight(flight, gateId) {
+  const gate = GATE_BY_ID[gateId];
+  return !!gate && airlinesMatch(gate.airline, effectiveAirline(flight));
+}
+
+function gateIsFreeForWholeWindow(flight, gateId) {
+  const w = occupancyWindow(flight);
+  if (!w) return false;
+
+  return !FLIGHTS.some(other => {
+    if (other.id === flight.id) return false;
+    if (other.status === 'CANCELLED' || other.status === 'DIVERTED') return false;
+    if (other.gate !== gateId) return false;
+    const ow = occupancyWindow(other);
+    return ow && windowsOverlap(w, ow);
+  });
+}
+
+function findGateOnlyPlacement(flight) {
+  const compatible = GATES
+    .map(g => g.id)
+    .filter(gateId => gateId !== flight.gate && gateCompatibleForFlight(flight, gateId));
+
+  for (const gateId of compatible) {
+    if (gateIsFreeForWholeWindow(flight, gateId)) return gateId;
+  }
+
+  // If every airline-owned gate is occupied, use any physically open gate.
+  // No time movement is allowed, so this still does not create a delay.
+  for (const gate of GATES) {
+    if (gate.id === flight.gate) continue;
+    if (gateIsFreeForWholeWindow(flight, gate.id)) return gate.id;
+  }
+
+  return null;
+}
+
+function fixAllOverlapsGateOnly() {
+  let moved = 0;
+  let safety = 0;
+
+  while (safety++ < 10000) {
+    const pairs = getAllDayGateConflictPairsNoDepartedFilter();
+    if (!pairs.length) break;
+
+    const [a, b] = pairs[0];
+    const aw = occupancyWindow(a);
+    const bw = occupancyWindow(b);
+
+    // Prefer moving the later-starting flight so earlier assignments remain stable.
+    let target = ((bw?.start ?? 0) >= (aw?.start ?? 0)) ? b : a;
+    let alternate = target.id === b.id ? a : b;
+    let gate = findGateOnlyPlacement(target);
+
+    if (!gate) {
+      target = alternate;
+      gate = findGateOnlyPlacement(target);
+    }
+
+    if (!gate) break;
+
+    target.gate = gate;
+
+    // Gate-only reassignment: intentionally DO NOT modify status, times,
+    // comments, delayTag, or gateStart.
+    queueFlightSync(target);
+    moved++;
+  }
+
+  renderBoard();
+  persistOperationalState();
+
+  return {
+    moved,
+    remaining: getAllDayGateConflictPairsNoDepartedFilter().length
+  };
+}
+
+async function promoteCurrentLayoutToProtectedStandard() {
+  if (!SHEET_URL) throw new Error('Sheet connection is not configured.');
+
+  const result = fixAllOverlapsGateOnly();
+
+  if (result.remaining) {
+    throw new Error(`Gate-only cleanup could not remove every overlap. ${result.remaining} overlap(s) remain.`);
+  }
+
+  if (syncTimer) {
+    clearTimeout(syncTimer);
+    syncTimer = null;
+  }
+  await flushSyncQueue();
+
+  setSyncStatus('online', '● Saving clean layout as standard…');
+
+  const params = new URLSearchParams({
+    action: 'promoteStandard',
+    _: String(Date.now())
+  });
+  const data = await fetchSheetJson(SHEET_URL + '?' + params.toString());
+
+  if (data?.error || !data?.ok) {
+    throw new Error(data?.error || 'Could not save new protected standard.');
+  }
+
+  setSyncStatus(
+    'online',
+    `● New protected standard saved (${new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',hour12:true})})`
+  );
+
+  logActivity(
+    `Conflict-free gate layout saved as the protected standard; ${result.moved} flight${result.moved === 1 ? '' : 's'} reassigned with no automatic delays.`,
+    'RESET'
+  );
+
+  return result;
+}
+
 function normalizeResetScheduleToZeroConflicts() {
   const initialPairs = getAllDayConflictPairs();
   if (!initialPairs.length) return { moved: 0, remaining: 0, affected: 0 };
@@ -2208,3 +2347,21 @@ function init() {
 }
 
 init();
+
+
+const cleanStandardBtn = document.getElementById('cleanStandardBtn');
+if (cleanStandardBtn) {
+  cleanStandardBtn.addEventListener('click', async () => {
+    cleanStandardBtn.disabled = true;
+    try {
+      const result = await promoteCurrentLayoutToProtectedStandard();
+      alert(`Done. ${result.moved} flight${result.moved === 1 ? '' : 's'} moved to eliminate overlaps. No automatic delays were added. This layout is now the protected standard.`);
+    } catch (e) {
+      console.error(e);
+      setSyncStatus('error', `● Standard save failed — ${e?.message || e}`);
+      alert(e?.message || String(e));
+    } finally {
+      cleanStandardBtn.disabled = false;
+    }
+  });
+}

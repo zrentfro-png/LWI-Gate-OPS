@@ -46,8 +46,13 @@ function doGet(e) {
       return jsonResponse({ ok: true, rows: getAllRowsWithBaseline() });
     }
 
+    if (action === 'promoteStandard') {
+      promoteLiveToProtectedStandard();
+      return jsonResponse({ ok: true });
+    }
+
     if (action === 'refreshBaseline') {
-      throw new Error('The standard schedule is protected and cannot be replaced from live simulation data.');
+      throw new Error('Use promoteStandard explicitly to replace the protected standard.');
     }
 
     return jsonResponse({ error: 'Unknown action: ' + action });
@@ -80,8 +85,13 @@ function doPost(e) {
       resetOperationalSheet(body.carryovers || []);
       return jsonResponse({ ok: true, rows: getAllRowsWithBaseline() });
     }
+    if (body.action === 'promoteStandard') {
+      promoteLiveToProtectedStandard();
+      return jsonResponse({ ok: true });
+    }
+
     if (body.action === 'refreshBaseline') {
-      throw new Error('The standard schedule is protected and cannot be replaced from live simulation data.');
+      throw new Error('Use promoteStandard explicitly to replace the protected standard.');
     }
 
     return jsonResponse({ error: 'Unknown action: ' + body.action });
@@ -199,8 +209,9 @@ function ensureBaselineExists() {
   // version and row count, leave it completely untouched.
   if (standard) {
     const props = PropertiesService.getScriptProperties();
-    const version = props.getProperty('GATEOPS_STANDARD_VERSION');
-    if (version === STANDARD_VERSION && standard.getLastRow() === STANDARD_FLIGHTS.length + 1) {
+    const version = props.getProperty('GATEOPS_STANDARD_VERSION') || '';
+    const promoted = version.indexOf('promoted-') === 0;
+    if ((version === STANDARD_VERSION && standard.getLastRow() === STANDARD_FLIGHTS.length + 1) || promoted) {
       try { standard.hideSheet(); } catch (_) {}
       return;
     }
@@ -231,6 +242,64 @@ function ensureBaselineExists() {
 
   PropertiesService.getScriptProperties().setProperty('GATEOPS_STANDARD_VERSION', STANDARD_VERSION);
   try { standard.hideSheet(); } catch (_) {}
+}
+
+
+function promoteLiveToProtectedStandard() {
+  const ss = getSpreadsheet();
+  const live = getLiveSheet();
+  let standard = ss.getSheetByName(BASELINE_SHEET_NAME);
+  if (!standard) standard = ss.insertSheet(BASELINE_SHEET_NAME);
+
+  const liveHeaders = getHeaders(live);
+  const lastRow = live.getLastRow();
+  if (lastRow < 2) throw new Error('Live flights sheet has no flight rows.');
+
+  const values = live.getRange(2, 1, lastRow - 1, liveHeaders.length).getValues();
+  const headerIndexes = {};
+  STANDARD_HEADERS.forEach(h => headerIndexes[h] = liveHeaders.indexOf(h));
+
+  const rows = values
+    .filter(row => row.some(v => String(v).trim() !== ''))
+    .map(row => STANDARD_HEADERS.map(h => {
+      const col = headerIndexes[h];
+      if (col === -1) return '';
+      return formatCell(row[col]);
+    }));
+
+  standard.clear();
+  standard.getRange(1, 1, 1, STANDARD_HEADERS.length).setValues([STANDARD_HEADERS]);
+  if (rows.length) {
+    standard.getRange(2, 1, rows.length, STANDARD_HEADERS.length).setValues(rows);
+  }
+
+  try {
+    const existing = standard.getProtections(SpreadsheetApp.ProtectionType.SHEET);
+    existing.forEach(p => { try { p.remove(); } catch (_) {} });
+
+    const protection = standard.protect()
+      .setDescription('Gate Ops protected standard schedule');
+
+    try {
+      const me = Session.getEffectiveUser();
+      protection.addEditor(me);
+      protection.removeEditors(
+        protection.getEditors().filter(e => e.getEmail() !== me.getEmail())
+      );
+    } catch (_) {}
+
+    try {
+      if (protection.canDomainEdit()) protection.setDomainEdit(false);
+    } catch (_) {}
+  } catch (_) {}
+
+  PropertiesService.getScriptProperties().setProperty(
+    'GATEOPS_STANDARD_VERSION',
+    'promoted-' + new Date().toISOString()
+  );
+
+  try { standard.hideSheet(); } catch (_) {}
+  SpreadsheetApp.flush();
 }
 
 function refreshBaselineFromLive() {
