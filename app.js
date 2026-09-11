@@ -658,20 +658,36 @@ async function promoteCurrentLayoutToProtectedStandard() {
     throw new Error(`Force-fit finished with ${result.remaining} overlap(s), so the standard was not saved.`);
   }
 
-  if (syncTimer) {
-    clearTimeout(syncTimer);
-    syncTimer = null;
+  // IMPORTANT: write the entire resulting Sheet-backed schedule, not merely
+  // whichever flights remain in the debounce queue.
+  const syncResult = await syncAllSheetBackedFlightsNow();
+
+  if (!syncResult || syncResult.verified !== syncResult.requested) {
+    throw new Error('The Google Sheet was not fully verified, so the protected standard was NOT replaced.');
   }
-  await flushSyncQueue();
 
-  setSyncStatus('online', '● Saving conflict-free layout as standard…');
-  const params = new URLSearchParams({ action: 'promoteStandard', _: String(Date.now()) });
+  setSyncStatus('online', '● Saving verified Sheet layout as protected standard…');
+  const params = new URLSearchParams({
+    action: 'promoteStandard',
+    _: String(Date.now())
+  });
   const data = await fetchSheetJson(SHEET_URL + '?' + params.toString());
-  if (data?.error || !data?.ok) throw new Error(data?.error || 'Could not save new protected standard.');
 
-  setSyncStatus('online', `● Conflict-free standard saved (${new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',hour12:true})})`);
-  logActivity(`Built realistic conflict-free standard for ${result.placed} flights; ${result.movedGate} gate changes, ${result.movedTime} time changes, max time shift ${result.maxTimeShift || 0} min, with no automatic delays.`, 'RESET');
-  return result;
+  if (data?.error || !data?.ok) {
+    throw new Error(data?.error || 'Could not save new protected standard.');
+  }
+
+  setSyncStatus(
+    'online',
+    `● Sheet synced + standard saved (${syncResult.verified} flights)`
+  );
+
+  logActivity(
+    `Built realistic conflict-free standard for ${result.placed} flights; ${result.movedGate} gate changes, ${result.movedTime} time changes, max time shift ${result.maxTimeShift || 0} min. Google Sheet verified ${syncResult.verified}/${syncResult.requested} before promotion. No automatic delays.`,
+    'RESET'
+  );
+
+  return { ...result, synced: syncResult.verified };
 }
 
 function normalizeResetScheduleToZeroConflicts() {
@@ -2353,16 +2369,15 @@ async function flushSyncQueue() {
   syncTimer = null;
   const rows = [...syncQueue.values()];
   syncQueue.clear();
-  if (!rows.length) return;
+  if (!rows.length) return { requested: 0, updated: 0, failed: 0, errors: [] };
 
   setSyncStatus('online', `● Saving ${rows.length} change${rows.length === 1 ? '' : 's'}…`);
 
   let updated = 0;
   let failed = 0;
-  let lastError = '';
+  const errors = [];
 
-  // Small batches keep Apps Script URLs safely under browser/proxy limits.
-  const batchSize = 12;
+  const batchSize = 10;
   for (let i = 0; i < rows.length; i += batchSize) {
     const batch = rows.slice(i, i + batchSize);
     try {
@@ -2373,24 +2388,154 @@ async function flushSyncQueue() {
       });
       const data = await fetchSheetJson(SHEET_URL + '?' + params.toString());
       if (data?.error || !data?.ok) throw new Error(data?.error || 'Bulk save failed.');
+
       updated += Number(data.updated) || 0;
       failed += Number(data.failed) || 0;
-      if (Array.isArray(data.errors) && data.errors.length) {
-        lastError = data.errors[data.errors.length - 1];
-      }
+      if (Array.isArray(data.errors)) errors.push(...data.errors);
     } catch (e) {
       failed += batch.length;
-      lastError = e?.message || String(e);
+      errors.push(e?.message || String(e));
       console.error('Bulk Sheet save failed:', e);
     }
   }
 
-  if (failed) {
-    setSyncStatus('error', `● Saved ${updated}/${rows.length} · ${failed} failed${lastError ? ` — ${lastError}` : ''}`);
-    return;
+  if (failed || updated !== rows.length) {
+    const lastError = errors.length ? errors[errors.length - 1] : '';
+    setSyncStatus(
+      'error',
+      `● Saved ${updated}/${rows.length} · ${failed || (rows.length - updated)} failed${lastError ? ` — ${lastError}` : ''}`
+    );
+    return { requested: rows.length, updated, failed: Math.max(failed, rows.length - updated), errors };
   }
 
-  setSyncStatus('online', `● Synced ${updated} change${updated === 1 ? '' : 's'} (${new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',hour12:true})})`);
+  setSyncStatus(
+    'online',
+    `● Synced ${updated} change${updated === 1 ? '' : 's'} (${new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',hour12:true})})`
+  );
+  return { requested: rows.length, updated, failed: 0, errors: [] };
+}
+
+async function syncAllSheetBackedFlightsNow() {
+  if (!SHEET_URL) throw new Error('Sheet connection is not configured.');
+
+  // Do not depend on whatever happened to be left in the debounce queue.
+  if (syncTimer) {
+    clearTimeout(syncTimer);
+    syncTimer = null;
+  }
+  syncQueue.clear();
+
+  const rows = [];
+  for (const f of FLIGHTS) {
+    const id = String(f?.sheetId || f?.id || '').trim();
+    if (!id || id.startsWith('ui_') || id.startsWith('legacy_') || id.startsWith('sim_')) continue;
+    if (f?.ops?.inboundDiversion) continue;
+    if (!SHEET_FLIGHT_IDS.has(id)) continue;
+    rows.push(flightToRow(f));
+  }
+
+  if (!rows.length) {
+    throw new Error('No Sheet-backed flights were available to sync.');
+  }
+
+  setSyncStatus('online', `● Writing ${rows.length} flights to Google Sheets…`);
+
+  let updated = 0;
+  let failed = 0;
+  const errors = [];
+  const batchSize = 10;
+
+  for (let i = 0; i < rows.length; i += batchSize) {
+    const batch = rows.slice(i, i + batchSize);
+    try {
+      const params = new URLSearchParams({
+        action: 'bulkUpdate',
+        rows: JSON.stringify(batch),
+        _: String(Date.now())
+      });
+      const data = await fetchSheetJson(SHEET_URL + '?' + params.toString());
+
+      if (data?.error || !data?.ok) {
+        throw new Error(data?.error || 'Bulk save failed.');
+      }
+
+      const batchUpdated = Number(data.updated) || 0;
+      const batchFailed = Number(data.failed) || 0;
+      updated += batchUpdated;
+      failed += batchFailed;
+
+      if (Array.isArray(data.errors)) errors.push(...data.errors);
+
+      if (batchUpdated !== batch.length || batchFailed) {
+        throw new Error(
+          `Google Sheets accepted ${batchUpdated}/${batch.length} flights in a batch.` +
+          (data?.errors?.length ? ` ${data.errors.join('; ')}` : '')
+        );
+      }
+    } catch (e) {
+      failed += batch.length;
+      errors.push(e?.message || String(e));
+      console.error('Full Sheet sync failed:', e);
+      throw new Error(`Google Sheet sync stopped after ${updated}/${rows.length} flights: ${e?.message || e}`);
+    }
+  }
+
+  if (updated !== rows.length || failed) {
+    throw new Error(`Google Sheet sync incomplete: ${updated}/${rows.length} flights updated.`);
+  }
+
+  setSyncStatus('online', `● Verifying ${rows.length} Sheet rows…`);
+
+  const liveData = await fetchSheetJson(SHEET_URL + '?action=list&_=' + Date.now());
+  const returnedRows = Array.isArray(liveData)
+    ? liveData
+    : (Array.isArray(liveData?.rows) ? liveData.rows : null);
+
+  if (!returnedRows) {
+    throw new Error('Could not reload Google Sheet rows for verification.');
+  }
+
+  const byId = new Map();
+  returnedRows.forEach((row, index) => {
+    const f = rowToFlight(row, index);
+    const id = String(f?.sheetId || '').trim();
+    if (id) byId.set(id, row);
+  });
+
+  let verified = 0;
+  const mismatches = [];
+
+  for (const sent of rows) {
+    const id = String(sent['GATEOPS ID'] || '').trim();
+    const returned = byId.get(id);
+    if (!returned) {
+      mismatches.push(`${id}: row missing after save`);
+      if (mismatches.length >= 8) break;
+      continue;
+    }
+
+    try {
+      verifySavedRow(sent, returned);
+      verified++;
+    } catch (e) {
+      mismatches.push(`${id}: ${e.message}`);
+      if (mismatches.length >= 8) break;
+    }
+  }
+
+  if (mismatches.length || verified !== rows.length) {
+    throw new Error(
+      `Sheet verification failed after ${verified}/${rows.length} verified.` +
+      (mismatches.length ? ` ${mismatches.join(' | ')}` : '')
+    );
+  }
+
+  setSyncStatus(
+    'online',
+    `● Google Sheet synced + verified (${verified} flights)`
+  );
+
+  return { requested: rows.length, updated, verified };
 }
 
 async function deleteFlightFromSheet(id) {
@@ -2453,7 +2598,7 @@ if (cleanStandardBtn) {
     cleanStandardBtn.disabled = true;
     try {
       const result = await promoteCurrentLayoutToProtectedStandard();
-      alert(`Done. ${result.placed} flights were rebuilt into a realistic 0-overlap schedule. ${result.movedGate} gate changes and ${result.movedTime} time changes were made; maximum time shift was ${result.maxTimeShift || 0} minutes. No automatic delays were added. This layout is now the protected standard.`);
+      alert(`Done. ${result.placed} flights were rebuilt into a realistic 0-overlap schedule. ${result.movedGate} gate changes and ${result.movedTime} time changes were made; maximum time shift was ${result.maxTimeShift || 0} minutes. No automatic delays were added. Google Sheets was synced and verified first, and this layout is now the protected standard.`);
     } catch (e) {
       console.error(e);
       setSyncStatus('error', `● Standard save failed — ${e?.message || e}`);
