@@ -438,6 +438,11 @@ function getAllDayConflictPairs() {
 }
 
 
+
+function allPhysicalGateIds() {
+  return Object.keys(GATE_BY_ID || {});
+}
+
 function getAllDayGateConflictPairsNoDepartedFilter() {
   const active = FLIGHTS.filter(f => f.status !== 'CANCELLED' && f.status !== 'DIVERTED');
   const byGate = {};
@@ -477,8 +482,7 @@ function gateIsFreeForWholeWindow(flight, gateId) {
 }
 
 function findGateOnlyPlacement(flight) {
-  const compatible = GATES
-    .map(g => g.id)
+  const compatible = allPhysicalGateIds()
     .filter(gateId => gateId !== flight.gate && gateCompatibleForFlight(flight, gateId));
 
   for (const gateId of compatible) {
@@ -487,9 +491,9 @@ function findGateOnlyPlacement(flight) {
 
   // If every airline-owned gate is occupied, use any physically open gate.
   // No time movement is allowed, so this still does not create a delay.
-  for (const gate of GATES) {
-    if (gate.id === flight.gate) continue;
-    if (gateIsFreeForWholeWindow(flight, gate.id)) return gate.id;
+  for (const gateId of allPhysicalGateIds()) {
+    if (gateId === flight.gate) continue;
+    if (gateIsFreeForWholeWindow(flight, gateId)) return gateId;
   }
 
   return null;
