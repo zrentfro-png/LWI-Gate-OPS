@@ -198,7 +198,7 @@ function ensureBaselineExists() {
   // If this protected standard already exists with the correct embedded
   // version and row count, leave it completely untouched.
   if (standard) {
-    const props = PropertiesService.getDocumentProperties();
+    const props = PropertiesService.getScriptProperties();
     const version = props.getProperty('GATEOPS_STANDARD_VERSION');
     if (version === STANDARD_VERSION && standard.getLastRow() === STANDARD_FLIGHTS.length + 1) {
       try { standard.hideSheet(); } catch (_) {}
@@ -229,7 +229,7 @@ function ensureBaselineExists() {
     try { if (protection.canDomainEdit()) protection.setDomainEdit(false); } catch (_) {}
   } catch (_) {}
 
-  PropertiesService.getDocumentProperties().setProperty('GATEOPS_STANDARD_VERSION', STANDARD_VERSION);
+  PropertiesService.getScriptProperties().setProperty('GATEOPS_STANDARD_VERSION', STANDARD_VERSION);
   try { standard.hideSheet(); } catch (_) {}
 }
 
