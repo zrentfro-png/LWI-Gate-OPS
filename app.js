@@ -2029,17 +2029,45 @@ function queueFlightSync(flight) {
   clearTimeout(syncTimer); syncTimer = setTimeout(flushSyncQueue, 500);
 }
 
+function normalizeSyncValue(value) {
+  return String(value ?? '').trim().toUpperCase();
+}
+
+function verifySavedRow(sent, returned) {
+  if (!returned || typeof returned !== 'object') throw new Error('Backend did not return the updated Sheet row.');
+  const keys = ['GATEOPS ID', 'AIRLINE', 'FLIGHT NUMBER', 'TO:', 'GATE:', 'BOARDING TIME:', 'DEPARTURE TIME:', 'STATUS:', 'COMMENTS', 'GATE BLOCK START:', 'DELAY TAG:'];
+  for (const key of keys) {
+    if (normalizeSyncValue(sent[key]) !== normalizeSyncValue(returned[key])) {
+      throw new Error(`Sheet verification failed for ${key}: sent "${sent[key] ?? ''}" but Sheet has "${returned[key] ?? ''}".`);
+    }
+  }
+}
+
 async function flushSyncQueue() {
   const rows = [...syncQueue.values()]; syncQueue.clear();
+  if (!rows.length) return;
+
+  let failed = 0;
+  let lastError = '';
   for (const row of rows) {
     try {
       setSyncStatus('online', '● Saving…');
-      const params = new URLSearchParams({ action:'upsert', row:JSON.stringify(row) });
+      const params = new URLSearchParams({ action:'upsert', row:JSON.stringify(row), _:String(Date.now()) });
       const data = await fetchSheetJson(SHEET_URL + '?' + params.toString());
-      if (data.error) throw new Error(data.error || 'Save failed');
-    } catch (e) { console.error(e); setSyncStatus('error', '● Save failed'); }
+      if (data.error || !data.ok) throw new Error(data.error || 'Backend did not confirm the save.');
+      verifySavedRow(row, data.row);
+    } catch (e) {
+      failed++;
+      lastError = e?.message || String(e);
+      console.error('Sheet save failed:', e);
+    }
   }
-  if (SHEET_URL) setSyncStatus('online', `● Synced (${new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',hour12:true})})`);
+
+  if (failed) {
+    setSyncStatus('error', `● Save failed (${failed}) — ${lastError}`);
+    return;
+  }
+  setSyncStatus('online', `● Synced & verified (${new Date().toLocaleTimeString([], {hour:'numeric',minute:'2-digit',hour12:true})})`);
 }
 
 async function deleteFlightFromSheet(id) {

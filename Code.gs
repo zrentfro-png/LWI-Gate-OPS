@@ -15,7 +15,8 @@ function doGet(e) {
       if (!e.parameter.row) throw new Error('Missing row data.');
       const row = JSON.parse(e.parameter.row);
       const id = upsertRow(row);
-      return jsonResponse({ ok: true, id });
+      SpreadsheetApp.flush();
+      return jsonResponse({ ok: true, id, row: getRowById(id) });
     }
 
     if (action === 'delete') {
@@ -48,7 +49,8 @@ function doPost(e) {
 
     if (body.action === 'upsert') {
       const id = upsertRow(body.row);
-      return jsonResponse({ ok: true, id });
+      SpreadsheetApp.flush();
+      return jsonResponse({ ok: true, id, row: getRowById(id) });
     }
     if (body.action === 'delete') {
       deleteRowById(body.id);
@@ -229,6 +231,18 @@ function findRowIndexById(sheet, id) {
     if (String(values[i][0]).trim() === String(id).trim()) return i + 2;
   }
   return -1;
+}
+
+
+function getRowById(id) {
+  const sheet = getLiveSheet();
+  const rowIndex = findRowIndexById(sheet, id);
+  if (rowIndex === -1) throw new Error('Could not verify updated row for GATEOPS ID "' + id + '".');
+  const headers = getHeaders(sheet);
+  const values = sheet.getRange(rowIndex, 1, 1, headers.length).getValues()[0];
+  const obj = {};
+  headers.forEach((header, i) => obj[header] = formatCell(values[i]));
+  return obj;
 }
 
 function upsertRow(rowObj) {
